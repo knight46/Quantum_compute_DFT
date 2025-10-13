@@ -269,6 +269,9 @@ if __name__ == "__main__":
     E_old = 0.0
     Vxc_time = []
     Exc_time = []
+    # print(f"dm:\n{dm}\n")
+    # print(f"eri:\n{eri}\n")
+    # print(f"ao_values:\n{ao_values}\n")
 
     for cycle in range(100):
         J = build_coulomb_matrix(dm, eri)
@@ -317,37 +320,37 @@ if __name__ == "__main__":
     if not converged:
         print("warning: SCF unconverged!")
 
-    mol = gto.Mole()
-    mol.atom = atom_structure
-    mol.basis = 'sto-3g'
-    mol.build()
-    def LDA(mol):
-        mf = dft.RKS(mol)
-        mf.xc = 'LDA,VWN'  
-        energy = mf.kernel()
-        return mf
-    mf = LDA(mol)
-    dm = mf.make_rdm1()
+    # mol = gto.Mole()
+    # mol.atom = atom_structure
+    # mol.basis = 'sto-3g'
+    # mol.build()
+    # def LDA(mol):
+    #     mf = dft.RKS(mol)
+    #     mf.xc = 'LDA,VWN'  
+    #     energy = mf.kernel()
+    #     return mf
+    # mf = LDA(mol)
+    # dm = mf.make_rdm1()
 
-    # 一电子项（动能 + 核吸引）
-    h1 = mol.intor('int1e_kin') + mol.intor('int1e_nuc')
-    E_one = np.einsum('ij,ji->', h1, dm)
+    # # 一电子项（动能 + 核吸引）
+    # h1 = mol.intor('int1e_kin') + mol.intor('int1e_nuc')
+    # E_one = np.einsum('ij,ji->', h1, dm)
 
-    # Hartree + XC 势
-    veff = mf.get_veff(mol, dm)
+    # # Hartree + XC 势
+    # veff = mf.get_veff(mol, dm)
 
-    # Coulomb 能量 (0.5 * ρV_H)
-    vh = mf.get_j(mol, dm)
-    E_coul = 0.5 * np.einsum('ij,ji->', vh, dm)
+    # # Coulomb 能量 (0.5 * ρV_H)
+    # vh = mf.get_j(mol, dm)
+    # E_coul = 0.5 * np.einsum('ij,ji->', vh, dm)
 
-    # 交换-相关能量
-    E_exc = mf.energy_elec()[0] - (E_one + E_coul)
+    # # 交换-相关能量
+    # E_exc = mf.energy_elec()[0] - (E_one + E_coul)
 
-    # 总能量
-    E_tot = mf.energy_tot()
+    # # 总能量
+    # E_tot = mf.energy_tot()
 
-    print(f' E_one : {E_one:.6f} Hartree')
-    print(f' E_coul : {E_coul:.6f} Hartree')
-    print(f' E_exc : {E_exc:.6f} Hartree')
-    print(f' E_tot : {mf.energy_tot():.8f} Hartree')
+    # print(f' E_one : {E_one:.6f} Hartree')
+    # print(f' E_coul : {E_coul:.6f} Hartree')
+    # print(f' E_exc : {E_exc:.6f} Hartree')
+    # print(f' E_tot : {mf.energy_tot():.8f} Hartree')
 
