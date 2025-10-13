@@ -197,85 +197,19 @@ static void copy_vwn_params_to_device()
     CUDA_CHECK(cudaMemcpyToSymbol(vwn_param, vwn_param_host, sizeof(VWNPar)*2));
 }
 
-/* lda_exc_vxc: host wrapper that runs GPU kernel */
-void lda_exc_vxc(int n, const double *rho_host, double *exc_host, double *vxc_host, double zeta)
-{
-    /* ---------- 1. 查剩余显存 ---------- */
-    size_t free_byte = 0, total_byte = 0;
-    CUDA_CHECK(cudaMemGetInfo(&free_byte, &total_byte));
-    const size_t SAFE_FREE = free_byte * 0.9;          // 留 10 % 安全垫
-
-    /* ---------- 2. 算每块最多多少元素 ---------- */
-    const size_t aux_buf   = 32 * 1024 * 1024;         // 32 MB 其它缓冲
-    const size_t per_elem  = 4 * sizeof(double);       // rho + exc + vxc + 对齐
-    const size_t left_byte = (SAFE_FREE > aux_buf) ? (SAFE_FREE - aux_buf) : 0;
-    if (left_byte == 0) {
-        std::cerr << "Not enough GPU memory to tile lda_exc_vxc!" << std::endl;
-        std::exit(EXIT_FAILURE);
-    }
-    size_t block_size = left_byte / per_elem;
-    if (block_size < 1) block_size = 1;
-    if (block_size > n) block_size = n;
-
-    // std::cout << "[lda_exc_vxc_tiled]  n=" << n
-    //           << "  free=" << free_byte/1024/1024 << " MB"
-    //           << "  block_size=" << block_size << std::endl;
-
-    /* ---------- 3. 分配 device 内存（复用缓冲） ---------- */
-    double *d_rho_b = nullptr;
-    double *d_exc_b = nullptr;
-    double *d_vxc_b = nullptr;
-    CUDA_CHECK(cudaMalloc(&d_rho_b, block_size * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_exc_b, block_size * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_vxc_b, block_size * sizeof(double)));
-
-    /* ---------- 4. 把 VWN 参数拷进 constant memory ---------- */
-    copy_vwn_params_to_device();
-
-    /* ---------- 5. 分块计算 ---------- */
-    const int BLOCK = 256;
-    for (int i0 = 0; i0 < n; i0 += block_size) {
-        int i1 = std::min(i0 + (int)block_size, n);
-        int elems = i1 - i0;
-
-        /* 5a. H2D 拷当前子块 */
-        CUDA_CHECK(cudaMemcpyAsync(d_rho_b, rho_host + i0,
-                                   elems * sizeof(double), cudaMemcpyHostToDevice));
-
-        /* 5b. 计算 exc/vxc 子块 */
-        int grid = (elems + BLOCK - 1) / BLOCK;
-        lda_exc_vxc_kernel<<<grid, BLOCK>>>(elems, d_rho_b, d_exc_b, d_vxc_b, zeta);
-        CUDA_CHECK(cudaGetLastError());
-
-        /* 5c. D2H 拷回子块 */
-        CUDA_CHECK(cudaMemcpyAsync(exc_host + i0, d_exc_b,
-                                   elems * sizeof(double), cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpyAsync(vxc_host + i0, d_vxc_b,
-                                   elems * sizeof(double), cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaDeviceSynchronize());
-    }
-
-    /* ---------- 6. 清理 ---------- */
-    CUDA_CHECK(cudaFree(d_rho_b));
-    CUDA_CHECK(cudaFree(d_exc_b));
-    CUDA_CHECK(cudaFree(d_vxc_b));
-}
-
 /* build_vxc_matrix: GPU version */
 void build_vxc_matrix(int nao, int ngrid,
-                      const double *ao,     // host pointer (ngrid, nao)
+                      const double *ao,    
                       const double *weights,
                       const double *rho,
-                      double *vxc_mat)      // host pointer (nao, nao)
+                      double *vxc_mat)     
 {
-    /* ---------- 1. 查剩余显存 ---------- */
     size_t free_byte = 0, total_byte = 0;
     CUDA_CHECK(cudaMemGetInfo(&free_byte, &total_byte));
-    const size_t SAFE_FREE = free_byte * 0.9;          // 留 10 % 安全垫
+    const size_t SAFE_FREE = free_byte * 0.9;        
 
-    /* ---------- 2. 算每块最多多少行 ---------- */
-    const size_t aux_buf   = 64 * 1024 * 1024;         // 64 MB 其它缓冲
-    const size_t per_row   = (nao + 3) * sizeof(double); // ao(1) + vxc(1) + weights(1)
+    const size_t aux_buf   = 64 * 1024 * 1024;       
+    const size_t per_row   = (nao + 3) * sizeof(double); 
     const size_t left_byte = (SAFE_FREE > aux_buf) ? (SAFE_FREE - aux_buf) : 0;
     if (left_byte == 0) {
         std::cerr << "Not enough GPU memory to tile build_vxc_matrix!" << std::endl;
@@ -285,17 +219,11 @@ void build_vxc_matrix(int nao, int ngrid,
     if (block_rows < 1) block_rows = 1;
     if (block_rows > ngrid) block_rows = ngrid;
 
-    // std::cout << "[build_vxc_matrix_tiled]  ngrid=" << ngrid
-    //           << "  nao=" << nao
-    //           << "  free=" << free_byte/1024/1024 << " MB"
-    //           << "  block_rows=" << block_rows << std::endl;
-
-    /* ---------- 3. 分配 device 内存（复用缓冲） ---------- */
-    double *d_ao_b   = nullptr;   // (block_rows, nao)
-    double *d_w_b    = nullptr;   // (block_rows)
-    double *d_rho_b  = nullptr;   // (block_rows)
-    double *d_vxc_b  = nullptr;   // (block_rows)
-    double *d_vxc_mat = nullptr;  // 全局 (nao, nao)
+    double *d_ao_b   = nullptr;   
+    double *d_w_b    = nullptr;   
+    double *d_rho_b  = nullptr;   
+    double *d_vxc_b  = nullptr;   
+    double *d_vxc_mat = nullptr;  
     CUDA_CHECK(cudaMalloc(&d_ao_b,    block_rows * nao * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_w_b,     block_rows * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_rho_b,   block_rows * sizeof(double)));
@@ -303,16 +231,13 @@ void build_vxc_matrix(int nao, int ngrid,
     CUDA_CHECK(cudaMalloc(&d_vxc_mat, (size_t)nao * nao * sizeof(double)));
     CUDA_CHECK(cudaMemset(d_vxc_mat, 0, (size_t)nao * nao * sizeof(double)));
 
-    /* ---------- 4. 把 VWN 参数拷进 constant memory ---------- */
     copy_vwn_params_to_device();
 
-    /* ---------- 5. 分块计算 ---------- */
     const int BLOCK = 256;
     for (int g0 = 0; g0 < ngrid; g0 += block_rows) {
         int g1 = std::min(g0 + (int)block_rows, ngrid);
         int rows = g1 - g0;
 
-        /* 5a. H2D 拷当前子块 */
         CUDA_CHECK(cudaMemcpyAsync(d_ao_b,   ao   + (size_t)g0 * nao,
                                    rows * nao * sizeof(double), cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpyAsync(d_w_b,    weights + g0,
@@ -320,12 +245,10 @@ void build_vxc_matrix(int nao, int ngrid,
         CUDA_CHECK(cudaMemcpyAsync(d_rho_b,  rho     + g0,
                                    rows * sizeof(double), cudaMemcpyHostToDevice));
 
-        /* 5b. 计算 vxc 子块 */
         int grid_g = (rows + BLOCK - 1) / BLOCK;
         lda_exc_vxc_kernel<<<grid_g, BLOCK>>>(rows, d_rho_b, nullptr, d_vxc_b, 0.0);
         CUDA_CHECK(cudaGetLastError());
 
-        /* 5c. 对 vxc_mat 子块求和（原子加） */
         int N = rows * nao;
         int grid = (N + BLOCK - 1) / BLOCK;
         build_vxc_matrix_kernel<<<grid, BLOCK>>>(
@@ -334,7 +257,6 @@ void build_vxc_matrix(int nao, int ngrid,
         CUDA_CHECK(cudaDeviceSynchronize());
     }
 
-    /* ---------- 6. 拷回结果 & 清理 ---------- */
     CUDA_CHECK(cudaMemcpy(vxc_mat, d_vxc_mat, (size_t)nao * nao * sizeof(double),
                           cudaMemcpyDeviceToHost));
 

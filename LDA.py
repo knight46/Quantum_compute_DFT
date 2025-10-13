@@ -13,14 +13,7 @@ libname = {'linux':'lda.so',
            'win32':'dft.dll'}[sys.platform]
 lib = ctypes.CDLL(os.path.abspath(libname))
 
-# ---------- 1. lda_exc_vxc ----------
-lib.lda_exc_vxc.argtypes = [
-    ctypes.c_int,
-    np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS'),
-    np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS'),
-    np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS')
-]
-lib.lda_exc_vxc.restype = None
+
 
 # ---------- 2. build_vxc_matrix ----------
 lib.build_vxc_matrix.argtypes = [
@@ -65,19 +58,6 @@ lib.get_rho.argtypes = [
     np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS')
 ]
 lib.get_rho.restype = None
-
-
-
-# ==== 2. Build LDA exchange-correlation functional ====
-
-
-def lda_exc_vxc(rho):
-    rho = np.asarray(rho, dtype=np.float64, order='C')
-    n = rho.size
-    exc = np.empty_like(rho)
-    vxc = np.empty_like(rho)
-    lib.lda_exc_vxc(n, rho, exc, vxc)
-    return exc, vxc
 
 
 
