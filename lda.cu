@@ -333,7 +333,6 @@ double compute_exc_energy(int ngrid,
         CUDA_CHECK(cudaDeviceSynchronize());
     }
 
-    /* ---------- 6. 清理 ---------- */
     CUDA_CHECK(cudaFree(d_rho_b));
     CUDA_CHECK(cudaFree(d_w_b));
     CUDA_CHECK(cudaFree(d_exc_b));
