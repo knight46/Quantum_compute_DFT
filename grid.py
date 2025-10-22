@@ -19,11 +19,22 @@ def init_grid(mol, grid_add, level=3):
     print("grid coords shape:", grids.coords.shape) #every x y z no boxes
     return grids, ao
 
+
+def init_gridpy(mol, grid_level=3):
+    grids = dft.gen_grid.Grids(mol)
+    grids.level = grid_level
+    grids.build()                              
+
+    ao_values = dft.numint.eval_ao(mol, grids.coords, deriv=0)
+    return grids, ao_values
+
 def build(atom_structure, grid_add):
     mol = gto.Mole()
     mol.atom = atom_structure
     mol.basis = 'sto-3g'
+    mol.spin = 0
     mol.build()
+
     
     nao = mol.nao_nr() 
     nelec = mol.nelec[0] + mol.nelec[1]
@@ -33,7 +44,8 @@ def build(atom_structure, grid_add):
     print(f"电子数: {nelec}")
     print(f"占据轨道数: {nocc}")
 
-    grids, ao_values = init_grid(mol, grid_add)
+    # grids, ao_values = init_grid(mol, grid_add)
+    grids, ao_values = init_gridpy(mol, grid_level=3)
     print(f"积分网格点数: {len(grids.coords)}")
     
     S = mol.intor('int1e_ovlp')

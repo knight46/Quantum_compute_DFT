@@ -352,7 +352,6 @@ void build_coulomb_matrix(int nao,
     CUDA_CHECK(cudaMemGetInfo(&free_byte, &total_byte));
     const size_t SAFE_FREE = free_byte * 0.9;   // 留 10 % 安全垫
 
-    /* ---------- 2. 算 dm 常驻 + 输出缓冲 + 每块 eri 大小 ---------- */
     const size_t dm_bytes   = (size_t)nao * nao * sizeof(double);
     const size_t j_bytes    = (size_t)nao * nao * sizeof(double);
     const size_t aux_buf    = 128 * 1024 * 1024;  // 128 MB 其它缓冲
@@ -368,7 +367,6 @@ void build_coulomb_matrix(int nao,
     if (block_m > nao) block_m = nao;
 
 
-    /* ---------- 3. 分配 device 内存 ---------- */
     double *d_dm = nullptr;
     double *d_J  = nullptr;
     double *d_eri_slice = nullptr;  // 只存 [block_m][nao][nao][nao]
@@ -448,13 +446,12 @@ void get_rho(int nao, int ngrid,
 {
     size_t free_byte = 0, total_byte = 0;
     CUDA_CHECK(cudaMemGetInfo(&free_byte, &total_byte));
-    const size_t SAFE_FREE = free_byte * 0.9;      // 留 10 % 给其它临时缓冲
+    const size_t SAFE_FREE = free_byte * 0.9;    
 
-    /* ---------- 2. 算每块最多多少行 ---------- */
-    const size_t dm_bytes   = (size_t)nao * nao * sizeof(double);  // dm 整份常驻
-    const size_t row_bytes  = (size_t)nao * sizeof(double);        // ao 一行
-    const size_t rho_bytes  = sizeof(double);                      // rho 一个元素
-    const size_t aux_buf    = 64 * 1024 * 1024;                    // 额外 64 MB 缓冲
+    const size_t dm_bytes   = (size_t)nao * nao * sizeof(double);  
+    const size_t row_bytes  = (size_t)nao * sizeof(double);      
+    const size_t rho_bytes  = sizeof(double);                    
+    const size_t aux_buf    = 64 * 1024 * 1024;                  
     const size_t left_bytes = (SAFE_FREE > dm_bytes + aux_buf) ?
                               (SAFE_FREE - dm_bytes - aux_buf) : 0;
     if (left_bytes == 0) {
@@ -465,42 +462,35 @@ void get_rho(int nao, int ngrid,
     if (rows_per_block < 1) rows_per_block = 1;
     if (rows_per_block > ngrid) rows_per_block = ngrid;
 
-    // std::cout << "[get_rho_tiled]  ngrid=" << ngrid
-    //           << "  nao=" << nao
-    //           << "  free=" << free_byte/1024/1024 << " MB"
-    //           << "  block_rows=" << rows_per_block << std::endl;
+
 
     double *d_dm = nullptr;
-    double *d_ao_block = nullptr;   // 只存当前块
-    double *d_rho_block = nullptr;  // 当前块结果
+    double *d_ao_block = nullptr;   
+    double *d_rho_block = nullptr;  
     CUDA_CHECK(cudaMalloc(&d_dm, dm_bytes));
     CUDA_CHECK(cudaMalloc(&d_ao_block, rows_per_block * nao * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_rho_block, rows_per_block * sizeof(double)));
     CUDA_CHECK(cudaMemcpy(d_dm, dm, dm_bytes, cudaMemcpyHostToDevice));
 
-    /* ---------- 4. 分块计算 ---------- */
-    const int BLOCK = 128;          // 与内核保持一致
+    const int BLOCK = 128;    
     for (int g0 = 0; g0 < ngrid; g0 += rows_per_block) {
         int g1 = std::min(g0 + (int)rows_per_block, ngrid);
         int rows = g1 - g0;
 
-        /* 4a. H2D 拷 ao 子块 */
         CUDA_CHECK(cudaMemcpyAsync(d_ao_block,
                                    ao + (size_t)g0 * nao,
                                    (size_t)rows * nao * sizeof(double),
                                    cudaMemcpyHostToDevice));
 
-        /* 4b. 计算 rho 子块 */
         int grid = (rows + BLOCK - 1) / BLOCK;
         get_rho_kernel<<<grid, BLOCK>>>(nao, rows, d_dm, d_ao_block, d_rho_block);
         CUDA_CHECK(cudaGetLastError());
 
-        /* 4c. D2H 拷回 rho_out */
         CUDA_CHECK(cudaMemcpyAsync(rho_out + g0,
                                    d_rho_block,
                                    rows * sizeof(double),
                                    cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaDeviceSynchronize());  // 确保块完成再复用缓冲
+        CUDA_CHECK(cudaDeviceSynchronize());  
     }
 
 
@@ -509,6 +499,5 @@ void get_rho(int nao, int ngrid,
     CUDA_CHECK(cudaFree(d_rho_block));
 }
 
-} // extern "C"
-
+} 
 /* ---------- end of file ---------- */
