@@ -34,6 +34,24 @@ def init_grid(mol, grid_add, level=3):
     return grids, ao
 
 
+def get_ao_grad(atom_structure, grids):
+    """
+    利用 PySCF 一次性返回 AO 梯度数组，形状 (ngrid, 3, nao)
+    mol  : 已 build 的 Mole 对象
+    grids: 已 build 的 Grids 对象
+    调用示例：
+        ao_grad = get_ao_grad(mol, grids)
+    """
+    mol = gto.Mole()
+    mol.atom = atom_structure
+    mol.basis = 'sto-3g'
+    mol.spin = 0
+    mol.build()
+    # eval_ao 返回 [1+3, ngrid, nao]；索引 1:4 即为 ∇AO
+    ao_all = dft.numint.eval_ao(mol, grids.coords, deriv=1)
+    ao_grad = ao_all[1:4].transpose(1, 0, 2)  # (3, ngrid, nao) -> (ngrid, 3, nao)
+    return ao_grad
+
 def init_gridpy(mol, grid_level=3):
     grids = dft.gen_grid.Grids(mol)
     grids.level = grid_level
