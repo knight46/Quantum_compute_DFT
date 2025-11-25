@@ -8,19 +8,19 @@ import time
 from datetime import timedelta
 
 
-libname = {'linux':'lda.so',
+libname = {'linux':'mxlda.so',
            'darwin':'lda.so',
            'win32':'dft.dll'}[sys.platform]
 lib = ctypes.CDLL(os.path.abspath(libname))
 
 # ---------- 1. lda_exc_vxc ----------
-lib.lda_exc_vxc.argtypes = [
-    ctypes.c_int,
-    np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS'),
-    np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS'),
-    np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS')
-]
-lib.lda_exc_vxc.restype = None
+# lib.lda_exc_vxc.argtypes = [
+#     ctypes.c_int,
+#     np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS'),
+#     np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS'),
+#     np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS')
+# ]
+# lib.lda_exc_vxc.restype = None
 
 # ---------- 2. build_vxc_matrix ----------
 lib.build_vxc_matrix.argtypes = [
@@ -148,113 +148,23 @@ def adaptive_mixing(dm_new, dm_old, cycle, dm_change):
     """
     自适应密度混合
     """
-    if cycle < 5:
-        mix_param = 0.3
+    if cycle < 10:
+        mix_param = 0.1
     elif dm_change > 1e-3:
         mix_param = 0.2
     elif dm_change > 1e-4:
-        mix_param = 0.5
+        mix_param = 0.3
     else:
-        mix_param = 0.7
+        mix_param = 0.5
     
     return mix_param * dm_new + (1 - mix_param) * dm_old
 
 if __name__ == "__main__": 
     # ==== 0. Molecule Definition ====
-    # atom_structure = 'H 0.0 0.0 0.0; H 0.0 0.0 0.74'
-    
-    # atom_structure = '''
-    #     C	-0.429	0.643	0.000
-    #     C	0.429	-0.643	0.000
-    #     C	0.429	1.923	0.000
-    #     C	-0.429	-1.923	0.000
-    #     H	-1.075	0.643	0.876
-    #     H	-1.075	0.643	-0.876
-    #     H	1.075	-0.643	0.876
-    #     H	1.075	-0.643	-0.876
-    #     H	-0.203	2.807	0.000
-    #     H	1.065	1.960	0.880
-    #     H	1.065	1.960	-0.880
-    #     H	0.203	-2.807	0.000
-    #     H	-1.065	-1.960	0.880
-    #     H	-1.065	-1.960	-0.880
-    # ''' 
-    atom_structure ="""
-        C   0.000    1.387    0.000
-        C   1.201    0.693    0.000
-        C   1.201   -0.693    0.000
-        C   0.000   -1.387    0.000
-        C  -1.201   -0.693    0.000
-        C   -1.201    0.693    0.000
-        H   0.000    2.469    0.000 
-        H   2.139    1.235    0.000
-        H   2.139   -1.235    0.000
-        H   0.000   -2.469   0.000
-        H  -2.139   -1.235    0.000
-        H  -2.139    1.235    0.000
-    """
-    # atom_structure = 'O 0.0 0.0 0.0; H 0.0 0.0 0.96; H 0.0 0.93 0.0'
-
-    # atom_structure ="""
-    #     O	-3.7479	-2.7792	0.4882
-    #     O	-2.3738	-3.0111	-1.3071
-    #     C	-2.513	-0.1909	-1.8131
-    #     C	-1.1764	2.5209	-0.9409
-    #     C	-2.0031	1.5018	1.758
-    #     C	-0.8804	-1.2824	2.021
-    #     C	-3.5804	-0.937	-1.0169
-    #     C	-2.9526	1.1955	-2.1916
-    #     C	-2.3833	2.352	-1.8174
-    #     C	1.8815	-2.3594	-0.6125
-    #     C	-1.4629	3.4123	0.231
-    #     C	-1.8326	2.9576	1.438
-    #     C	-1.0853	1.0718	2.8652
-    #     C	4.459	-0.5303	-0.9467
-    #     C	-0.5866	-0.1682	2.9803
-    #     C	0.1014	-1.3198	0.8874
-    #     C	0.9023	-2.3337	0.5245
-    #     C	3.2757	-2.6377	-0.1273
-    #     C	4.3658	-1.869	-0.2753
-    #     C	4.8875	0.5356	0.0198
-    #     C	2.8016	1.8907	-0.2761
-    #     C	4.1498	1.6148	0.3194
-    #     C	-3.1614	-2.3402	-0.6531
-    #     C	2.9151	2.7057	-1.5545
-    #     H	-2.311	-0.737	-2.7438
-    #     H	-1.5693	-0.1983	-1.2671
-    #     H	-0.4105	3.0246	-1.5444
-    #     H	-0.7038	1.5848	-0.6439
-    #     H	-3.0337	1.3765	2.1153
-    #     H	-1.9147	0.8661	0.8812
-    #     H	-1.8963	-1.201	1.6271
-    #     H	-0.859	-2.2281	2.5767
-    #     H	-4.5133	-1.0083	-1.5879
-    #     H	-3.7928	-0.3882	-0.0919
-    #     H	-3.8205	1.2536	-2.846
-    #     H	-2.826	3.2695	-2.2031
-    #     H	1.5903	-3.1629	-1.2997
-    #     H	1.8169	-1.4307	-1.1855
-    #     H	-1.3824	4.4857	0.0789
-    #     H	-2.0384	3.6789	2.2252
-    #     H	-0.8358	1.795	3.6385
-    #     H	3.5528	-0.2821	-1.4992
-    #     H	5.2385	-0.6044	-1.7166
-    #     H	0.071	-0.3905	3.8169
-    #     H	0.1702	-0.4088	0.2972
-    #     H	0.8333	-3.2545	1.1027
-    #     H	3.4136	-3.5908	0.3825
-    #     H	5.2993	-2.2571	0.1313
-    #     H	5.8628	0.4282	0.4887
-    #     H	2.2272	0.9773	-0.4536
-    #     H	2.2161	2.4583	0.458
-    #     H	4.5497	2.3472	1.0155
-    #     H	1.9216	2.9259	-1.9551
-    #     H	3.4225	3.6591	-1.3723
-    #     H	3.474	2.1652	-2.3257
-    #     H	-3.4626	-3.6887	0.7199
-    # """
-
-    grid_add = "./grid_txt/C6H6_grid.txt"
+    with open("./atom_txt/c4h10.txt", "r") as f:
+        atom_structure = f.read()
+ 
+    grid_add = "./grid_txt/C4H10_grid.txt"
     Hcore, S, nocc, T, eri, ao_values, grids, E_nuc = build(atom_structure, grid_add)
     e_init, C_init = eigh(Hcore, S)
     dm = 2 * C_init[:, :nocc] @ C_init[:, :nocc].T
@@ -321,6 +231,7 @@ if __name__ == "__main__":
     mol.atom = atom_structure
     mol.basis = 'sto-3g'
     mol.build()
+    start_time = time.time()
     def LDA(mol):
         mf = dft.RKS(mol)
         mf.xc = 'LDA,VWN'  
@@ -345,9 +256,10 @@ if __name__ == "__main__":
 
     # 总能量
     E_tot = mf.energy_tot()
-
+    end_time = time.time()
+    cost_time = end_time - start_time
     print(f' E_one : {E_one:.6f} Hartree')
     print(f' E_coul : {E_coul:.6f} Hartree')
     print(f' E_exc : {E_exc:.6f} Hartree')
     print(f' E_tot : {mf.energy_tot():.8f} Hartree')
-
+    print(f' time_cost: {cost_time:.6f} s')
