@@ -204,6 +204,17 @@ __global__ void get_rho_kernel(int nao,
             r += dm_row[v] * phiu * phi_g[v];
         }
     }
+    if (g == 0) {
+        double tmp = 0.0;
+        for (int u = 0; u < nao; ++u) {
+            double phiu = phi_g[u];
+            const double *dm_row = dm + u * nao;
+            for (int v = 0; v < nao; ++v) {
+                tmp += dm_row[v] * phiu * phi_g[v];
+            }
+        }
+        printf("g=0 phi[0]=%f dm[0,0]=%f tmp=%f\n", phi_g[0], dm[0], tmp);
+    }
     rho_out[g] = r;
 }
 
@@ -484,7 +495,6 @@ void get_rho(int nao, int ngrid,
                                    ao + (size_t)g0 * nao,
                                    (size_t)rows * nao * sizeof(double),
                                    cudaMemcpyHostToDevice));
-
         int grid = (rows + BLOCK - 1) / BLOCK;
         get_rho_kernel<<<grid, BLOCK>>>(nao, rows, d_dm, d_ao_block, d_rho_block);
         CUDA_CHECK(cudaGetLastError());

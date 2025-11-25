@@ -61,12 +61,14 @@ def get_rho_grad(dm, ao_values, ao_grad):
     ao_grad: (ngrid, 3, nao)
     """
     ngrid, nao = ao_values.shape[0], ao_values.shape[1]
+    print(f'ngrid={ngrid}, nao={nao}, blocks={(ngrid + 127) // 128}')
     rho = np.empty(ngrid, dtype=np.float64)
+    rho = np.full(ngrid, -999.0, dtype=np.float64)
     lib.get_rho(nao, ngrid,
                 np.ascontiguousarray(dm, dtype=np.float64),
                 np.ascontiguousarray(ao_values, dtype=np.float64),
                 rho)
-
+    print(f'after get_rho rho[0] = {rho[0]:.6f}')
     # 计算 ∇ρ
     grad_rho = np.einsum('gmi,ij,gj->gm', ao_grad, dm, ao_values) * 2.0
     sigma = np.einsum('gm,gm->g', grad_rho, grad_rho)
@@ -74,6 +76,7 @@ def get_rho_grad(dm, ao_values, ao_grad):
     sigma = np.clip(sigma, 0.0, None)    # 二次保险
     if sigma.min() < 0:
         print('[WARN] sigma < 0 detected!', sigma.min())
+    print(f'rho[0]={rho[0]:.6f}, sigma[0]={sigma[0]:.6f}, |∇ρ|={np.sqrt(sigma[0]):.6f}')
     return rho, sigma
 
 
@@ -149,7 +152,7 @@ if __name__ == "__main__":
     e_init, C_init = eigh(Hcore, S)
     dm = 2 * C_init[:, :nocc] @ C_init[:, :nocc].T
     start_time = time.time()
-
+    print(f'|dm|_F = {np.linalg.norm(dm):.6f},  dm max = {dm.max():.6f}')
     print("\nSCF started!")
     print("-" * 70)
     print(f"{'epoch':>4} {'tot energy':>15} {'Δenergy':>12} {'Δdensity':>12}")
