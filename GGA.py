@@ -7,7 +7,7 @@ from pyscf import gto, dft
 from grid import build, get_ao_grad
 
 # ---------------- 载入 CUDA 共享库 -----------------
-libname = {'linux':'mxgga.so',
+libname = {'linux':'gga.so',
            'darwin':'libgga.so',
            'win32':'dft.dll'}[sys.platform]
 lib = ctypes.CDLL(os.path.abspath(libname))
@@ -55,30 +55,32 @@ lib.get_rho.restype = None
 # ===================================================
 #  工具函数
 # ===================================================
+
 def get_rho_grad(dm, ao_values, ao_grad):
     """
     返回 rho 与 sigma = |∇ρ|²
     ao_grad: (ngrid, 3, nao)
     """
     ngrid, nao = ao_values.shape[0], ao_values.shape[1]
-    print(f'ngrid={ngrid}, nao={nao}, blocks={(ngrid + 127) // 128}')
     rho = np.empty(ngrid, dtype=np.float64)
     rho = np.full(ngrid, -999.0, dtype=np.float64)
     lib.get_rho(nao, ngrid,
                 np.ascontiguousarray(dm, dtype=np.float64),
                 np.ascontiguousarray(ao_values, dtype=np.float64),
                 rho)
-    print(f'after get_rho rho[0] = {rho[0]:.6f}')
+
+    # 1. 先把极端小的 rho 点 clamp 掉，防止后续 1/ρ 爆炸
+    rho = np.clip(rho, 1e-12, None)
+
     # 计算 ∇ρ
     grad_rho = np.einsum('gmi,ij,gj->gm', ao_grad, dm, ao_values) * 2.0
     sigma = np.einsum('gm,gm->g', grad_rho, grad_rho)
     sigma = np.abs(sigma)                # 强制非负
-    sigma = np.clip(sigma, 0.0, None)    # 二次保险
-    if sigma.min() < 0:
-        print('[WARN] sigma < 0 detected!', sigma.min())
-    print(f'rho[0]={rho[0]:.6f}, sigma[0]={sigma[0]:.6f}, |∇ρ|={np.sqrt(sigma[0]):.6f}')
-    return rho, sigma
+    sigma = np.clip(sigma, 0.0, 1e4)     # 二次保险：上限 1e4 足够化学体系
 
+    print(f'rho  : min={rho.min():.3e} max={rho.max():.3e}')
+    print(f'sigma: min={sigma.min():.3e} max={sigma.max():.3e}')
+    return rho, sigma
 
 def build_vxc_matrix(dm, ao_values, ao_grad, grids):
     rho, sigma = get_rho_grad(dm, ao_values, ao_grad)
@@ -125,16 +127,16 @@ def solve_fock_equation(F, S):
 
 
 def adaptive_mixing(dm_new, dm_old, cycle, dm_change):
-    # if cycle < 10:
-    #     mix_param = 0.1
-    # elif dm_change > 1e-3:
-    #     mix_param = 0.2
-    # elif dm_change > 1e-4:
-    #     mix_param = 0.3
-    # else:
-    #     mix_param = 0.5
-    # return mix_param * dm_new + (1 - mix_param) * dm_old
-    return 0.05 * dm_new + 0.95 * dm_old   # 超保守混合
+    if cycle < 10:
+        mix_param = 0.1
+    elif dm_change > 1e-3:
+        mix_param = 0.2
+    elif dm_change > 1e-4:
+        mix_param = 0.3
+    else:
+        mix_param = 0.5
+    return mix_param * dm_new + (1 - mix_param) * dm_old
+
 
 
 # ===================================================
@@ -146,6 +148,21 @@ if __name__ == "__main__":
         atom_structure = f.read()
     grid_add = "./grid_txt/C4H10_grid.txt"
     Hcore, S, nocc, T, eri, ao_values, grids, E_nuc = build(atom_structure, grid_add)
+    print(f'Python ao_values[0,0] = {ao_values[0,0]:.6f}')
+
+
+    mol = gto.Mole()
+    mol.atom = atom_structure
+    mol.basis = 'sto-3g'
+    mol.build()
+    print(f'1st atom R = {mol.atom_coord(0)}')     # 第一个原子坐标
+    r0 = mol.atom_coord(0)
+    dist = np.linalg.norm(grids.coords - r0, axis=1)
+    ig_min = dist.argmin()
+    print(f'closest grid to atom-0: ig={ig_min}, dist={dist[ig_min]:.3f}')
+    print(f'ao_values[ig_min,0] = {ao_values[ig_min,0]:.6f}')
+
+
     # Hcore, S, nocc, T, eri, ao_values, grids, E_nuc
     ao_grad = get_ao_grad(atom_structure, grids)
     # ---- 初始猜测 ----
@@ -169,7 +186,6 @@ if __name__ == "__main__":
         Vxc = build_vxc_matrix(dm, ao_values, ao_grad, grids)
         t2 = time.time()
         Vxc_time.append(t2 - t1)
-
         F = Hcore + J + Vxc
         e, C = solve_fock_equation(F, S)
         dm_new = 2 * C[:, :nocc] @ C[:, :nocc].T

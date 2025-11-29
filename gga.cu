@@ -124,7 +124,12 @@ __global__ void gga_exc_vxc_kernel(int ngrid,
     double r=rho[g],s=sigma[g];
     if(r<1e-300) r=1e-300;
     if(s<1e-300) s=1e-300;
-
+    if(g==0){
+        double kF=pow(3.*M_PI*M_PI*r,1./3.);
+        double s=sqrt(s)/ (2.*kF*r);
+        printf("g0: rho=%.4e  sqrt(s)=%.4e  s=%.4e  kF=%.4e  s_param=%.4e\n",
+            r,sqrt(s),s,kF,s);
+    }                          
     double ex,vrx,vsx,ec,vrc,vsc;
     pbe_exchange(r,s,ex,vrx,vsx);
     pbe_correlation(r,s,ec,vrc,vsc);
@@ -204,17 +209,7 @@ __global__ void get_rho_kernel(int nao,
             r += dm_row[v] * phiu * phi_g[v];
         }
     }
-    if (g == 0) {
-        double tmp = 0.0;
-        for (int u = 0; u < nao; ++u) {
-            double phiu = phi_g[u];
-            const double *dm_row = dm + u * nao;
-            for (int v = 0; v < nao; ++v) {
-                tmp += dm_row[v] * phiu * phi_g[v];
-            }
-        }
-        printf("g=0 phi[0]=%f dm[0,0]=%f tmp=%f\n", phi_g[0], dm[0], tmp);
-    }
+    
     rho_out[g] = r;
 }
 
