@@ -15,6 +15,7 @@
 ## 运行 Python 脚本  
 
 使用arch架构1需要将文件LDA.py文件中上面libname中的linux改为lda.so
+
 使用arch架构2需要将文件LDA.py文件中上面libname中的linux改为mxlda.so
 
 `python LDA.py`
@@ -32,6 +33,7 @@
 ## 运行Python脚本
 
 使用arch架构1需要将文件GGA.py文件中上面libname中的linux改为gga.so
+
 使用arch架构2需要将文件GGA.py文件中上面libname中的linux改为mxgga.so
 
 `python GGA.py`
