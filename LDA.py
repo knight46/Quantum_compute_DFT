@@ -90,7 +90,6 @@ def get_rho(dm, ao_values):
                 np.ascontiguousarray(dm, dtype=np.float64),
                 np.ascontiguousarray(ao_values, dtype=np.float64),
                 rho)
-    print(f'after get_rho rho[0] = {rho[0]:.6f}')
     return rho
 
 

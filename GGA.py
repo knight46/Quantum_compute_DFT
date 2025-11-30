@@ -7,7 +7,7 @@ from pyscf import gto, dft
 from grid import build, get_ao_grad
 
 # ---------------- 载入 CUDA 共享库 -----------------
-libname = {'linux':'gga.so',
+libname = {'linux':'mxgga.so',
            'darwin':'libgga.so',
            'win32':'dft.dll'}[sys.platform]
 lib = ctypes.CDLL(os.path.abspath(libname))
@@ -21,7 +21,8 @@ lib.build_vxc_matrix_gga.argtypes = [
     np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS'),  # weights
     np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS'),  # rho
     np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS'),  # sigma
-    np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS')]  # vxc_mat
+    np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS'),  # grad_rho (NEW)
+    np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS')]
 lib.build_vxc_matrix_gga.restype = None
 
 # -------- 2. compute_exc_energy_gga ----------
@@ -52,53 +53,62 @@ lib.get_rho.argtypes = [ctypes.c_int, ctypes.c_int,
                         np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS')]
 lib.get_rho.restype = None
 
+lib.get_rho_sigma.restype = None
+lib.get_rho_sigma.argtypes = [
+    ctypes.c_int,
+    ctypes.c_int,
+    np.ctypeslib.ndpointer(dtype=np.float64, flags='C'),  # dm
+    np.ctypeslib.ndpointer(dtype=np.float64, flags='C'),  # ao
+    np.ctypeslib.ndpointer(dtype=np.float64, flags='C'),  # ao_grad
+    np.ctypeslib.ndpointer(dtype=np.float64, flags='C'),  # rho
+    np.ctypeslib.ndpointer(dtype=np.float64, flags='C'),  # sigma
+    np.ctypeslib.ndpointer(dtype=np.float64, flags='C'),  # grad_rho (NEW)
+]
+
 # ===================================================
 #  工具函数
 # ===================================================
 
 def get_rho_grad(dm, ao_values, ao_grad):
     """
-    返回 rho 与 sigma = |∇ρ|²
-    ao_grad: (ngrid, 3, nao)
+    返回 rho, sigma, grad_rho
     """
-    ngrid, nao = ao_values.shape[0], ao_values.shape[1]
-    rho = np.empty(ngrid, dtype=np.float64)
-    rho = np.full(ngrid, -999.0, dtype=np.float64)
-    lib.get_rho(nao, ngrid,
-                np.ascontiguousarray(dm, dtype=np.float64),
-                np.ascontiguousarray(ao_values, dtype=np.float64),
-                rho)
+    ngrid, nao = ao_values.shape
+    rho   = np.empty(ngrid, dtype=np.float64)
+    sigma = np.empty(ngrid, dtype=np.float64)
+    grad_rho = np.empty((ngrid, 3), dtype=np.float64) # NEW
 
-    # 1. 先把极端小的 rho 点 clamp 掉，防止后续 1/ρ 爆炸
-    rho = np.clip(rho, 1e-12, None)
-
-    # 计算 ∇ρ
-    grad_rho = np.einsum('gmi,ij,gj->gm', ao_grad, dm, ao_values) * 2.0
-    sigma = np.einsum('gm,gm->g', grad_rho, grad_rho)
-    sigma = np.abs(sigma)                # 强制非负
-    sigma = np.clip(sigma, 0.0, 1e4)     # 二次保险：上限 1e4 足够化学体系
-
-    print(f'rho  : min={rho.min():.3e} max={rho.max():.3e}')
-    print(f'sigma: min={sigma.min():.3e} max={sigma.max():.3e}')
-    return rho, sigma
+    lib.get_rho_sigma(nao, ngrid,
+                      np.ascontiguousarray(dm, dtype=np.float64),
+                      np.ascontiguousarray(ao_values, dtype=np.float64),
+                      np.ascontiguousarray(ao_grad,  dtype=np.float64),
+                      rho, sigma, grad_rho) # Pass NEW arg
+    
+    # 调试打印 (可选)
+    # print('first 10 rho:', rho[:10])
+    
+    # 保险 clamp
+    rho   = np.clip(rho,   1e-12, None)
+    sigma = np.clip(sigma, 0.0, 1e4)
+    return rho, sigma, grad_rho
 
 def build_vxc_matrix(dm, ao_values, ao_grad, grids):
-    rho, sigma = get_rho_grad(dm, ao_values, ao_grad)
+    rho, sigma, grad_rho = get_rho_grad(dm, ao_values, ao_grad)
     nao, ngrid = ao_values.shape[1], ao_values.shape[0]
 
     ao_c   = np.ascontiguousarray(ao_values,  dtype=np.float64)
-    aograd_c = np.ascontiguousarray(ao_grad.reshape(ngrid, 3*nao), dtype=np.float64)
+    aograd_c = np.ascontiguousarray(ao_grad, dtype=np.float64) # 只要是 contig 即可，C++会按指针算
     w_c    = np.ascontiguousarray(grids.weights, dtype=np.float64)
     rho_c  = np.ascontiguousarray(rho,  dtype=np.float64)
     sig_c  = np.ascontiguousarray(sigma, dtype=np.float64)
+    grho_c = np.ascontiguousarray(grad_rho, dtype=np.float64) # NEW
     vxc_mat = np.empty((nao, nao), dtype=np.float64, order='C')
 
-    lib.build_vxc_matrix_gga(nao, ngrid, ao_c, aograd_c, w_c, rho_c, sig_c, vxc_mat)
+    lib.build_vxc_matrix_gga(nao, ngrid, ao_c, aograd_c, w_c, rho_c, sig_c, grho_c, vxc_mat)
     return vxc_mat
 
-
 def compute_exc_energy(dm, ao_values, ao_grad, grids):
-    rho, sigma = get_rho_grad(dm, ao_values, ao_grad)
+    rho, sigma, _ = get_rho_grad(dm, ao_values, ao_grad) # Ignore grad_rho here
     w_c   = np.ascontiguousarray(grids.weights, dtype=np.float64)
     rho_c = np.ascontiguousarray(rho,  dtype=np.float64)
     sig_c = np.ascontiguousarray(sigma, dtype=np.float64)
