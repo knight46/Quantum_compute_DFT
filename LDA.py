@@ -8,7 +8,7 @@ import time
 from datetime import timedelta
 
 
-libname = {'linux':'mxlda.so',
+libname = {'linux':'lda.so',
            'darwin':'lda.so',
            'win32':'dft.dll'}[sys.platform]
 lib = ctypes.CDLL(os.path.abspath(libname))
@@ -161,10 +161,11 @@ def adaptive_mixing(dm_new, dm_old, cycle, dm_change):
 
 if __name__ == "__main__": 
     # ==== 0. Molecule Definition ====
-    with open("./atom_txt/c4h10.txt", "r") as f:
+    atom = "benzene"
+    with open(f"./atom_txt/{atom}.txt", "r") as f:
         atom_structure = f.read()
  
-    grid_add = "./grid_txt/C4H10_grid.txt"
+    grid_add = f"./grid_txt/{atom}_grid.txt"
     Hcore, S, nocc, T, eri, ao_values, grids, E_nuc = build(atom_structure, grid_add)
     e_init, C_init = eigh(Hcore, S)
     dm = 2 * C_init[:, :nocc] @ C_init[:, :nocc].T
