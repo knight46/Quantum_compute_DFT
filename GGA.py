@@ -7,7 +7,7 @@ from pyscf import gto, dft
 from grid import build, get_ao_grad
 
 # ---------------- 载入 CUDA 共享库 -----------------
-libname = {'linux':'gga.so',
+libname = {'linux':'./weights/gga.so',
            'darwin':'libgga.so',
            'win32':'dft.dll'}[sys.platform]
 lib = ctypes.CDLL(os.path.abspath(libname))
@@ -148,7 +148,7 @@ def adaptive_mixing(dm_new, dm_old, cycle, dm_change):
 
 
 if __name__ == "__main__":
-    atom = "benzene"
+    atom = "h2o"
     with open(f"./atom_txt/{atom}.txt", "r") as f:
         atom_structure = f.read()
     grid_add = f"./grid_txt/{atom}_grid.txt"
@@ -158,7 +158,7 @@ if __name__ == "__main__":
 
     mol = gto.Mole()
     mol.atom = atom_structure
-    mol.basis = 'sto-6g'
+    mol.basis = 'sto-3g'
     mol.build()
     print(f'1st atom R = {mol.atom_coord(0)}')     # 第一个原子坐标
     r0 = mol.atom_coord(0)

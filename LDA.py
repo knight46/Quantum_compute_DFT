@@ -8,7 +8,7 @@ import time
 from datetime import timedelta
 
 
-libname = {'linux':'mxlda.so',
+libname = {'linux':'./weights/lda.so',
            'darwin':'lda.so',
            'win32':'dft.dll'}[sys.platform]
 lib = ctypes.CDLL(os.path.abspath(libname))
@@ -161,10 +161,11 @@ def adaptive_mixing(dm_new, dm_old, cycle, dm_change):
 
 if __name__ == "__main__": 
     # ==== 0. Molecule Definition ====
-    with open("./atom_txt/c4h10.txt", "r") as f:
+    atom = "h2o"
+    with open(f"./atom_txt/{atom}.txt", "r") as f:
         atom_structure = f.read()
  
-    grid_add = "./grid_txt/C4H10_grid.txt"
+    grid_add = f"./grid_txt/{atom}_grid.txt"
     Hcore, S, nocc, T, eri, ao_values, grids, E_nuc = build(atom_structure, grid_add)
     e_init, C_init = eigh(Hcore, S)
     dm = 2 * C_init[:, :nocc] @ C_init[:, :nocc].T
@@ -218,7 +219,7 @@ if __name__ == "__main__":
             print(f"SCF converged! E = {E_tot:.8f} Hartree")
             print(f"Vxc_average_time: {(sum(Vxc_time)/len(Vxc_time)*1000):.6f} ms")
             print(f"Exc_average_time: {(sum(Exc_time)/len(Exc_time)*1000):.6f} ms")
-            print(f"expense total time: {(end_time - start_time):.6f} s")
+            print(f"expense total time: {(end_time - start_time):.6f} s\n")
             break
         
         dm = adaptive_mixing(dm_new, dm, cycle, dm_change)

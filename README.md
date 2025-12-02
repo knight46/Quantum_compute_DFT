@@ -3,14 +3,14 @@
 ## 编译 CUDA 文件
 
 ### arch架构1 (4060...)
-`nvcc -shared -o lda.so lda.cu -Xcompiler -fPIC -I/usr/include/eigen3 -gencode arch=compute_86,code=sm_86 -gencode arch=compute_86,code=compute_86`
+`nvcc -shared -o ./weights/lda.so ./src/lda.cu -Xcompiler -fPIC -I/usr/include/eigen3 -gencode arch=compute_86,code=sm_86 -gencode arch=compute_86,code=compute_86`
 
 ### arch架构2 (MX250...)
-`nvcc -shared -o mxlda.so lda.cu -Xcompiler -fPIC -I/usr/include/eigen3 -gencode arch=compute_50,code=sm_50 -gencode arch=compute_50,code=compute_50`
+`nvcc -shared -o ./weights/mxlda.so ./src.lda.cu -Xcompiler -fPIC -I/usr/include/eigen3 -gencode arch=compute_50,code=sm_50 -gencode arch=compute_50,code=compute_50`
 
 
 ## 编译 C++ 文件
-`g++ -shared -o liblda.so lda.cpp -I/usr/include/eigen3 -gencode arch=compute_86,code=sm_86 -gencode arch=compute_86,code=compute_86`
+`g++ -shared -o ./weigths/liblda.so ./src/lda.cpp -I/usr/include/eigen3 -gencode arch=compute_86,code=sm_86 -gencode arch=compute_86,code=compute_86`
 
 ## 运行 Python 脚本  
 
@@ -25,10 +25,10 @@
 ## 编译 CUDA 文件
 
 ### arch架构1 (4060...)
-`nvcc -shared -o gga.so gga.cu -Xcompiler -fPIC -I/usr/include/eigen3 -gencode arch=compute_86,code=sm_86 -gencode arch=compute_86,code=compute_86`
+`nvcc -shared -o ./weights/gga.so ./src/gga.cu -Xcompiler -fPIC -I/usr/include/eigen3 -gencode arch=compute_86,code=sm_86 -gencode arch=compute_86,code=compute_86`
 
 ### arch架构2 (MX250...)
-`nvcc -shared -o mxgga.so gga.cu -Xcompiler -fPIC -I/usr/include/eigen3 -gencode arch=compute_50,code=sm_50 -gencode arch=compute_50,code=compute_50`
+`nvcc -shared -o ./weights/mxgga.so ./src/gga.cu -Xcompiler -fPIC -I/usr/include/eigen3 -gencode arch=compute_50,code=sm_50 -gencode arch=compute_50,code=compute_50`
 
 ## 运行Python脚本
 
@@ -39,4 +39,4 @@
 `python GGA.py`
 
 
-**PS：** 文件类有各种分子坐标信息以及网格信息,可自行选择或添加
+**PS：** 文件内有各种分子坐标信息以及网格信息,可自行选择或添加
