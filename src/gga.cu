@@ -340,18 +340,6 @@ __global__ void build_coulomb_kernel(int nao, int rows_m, int m0, const double *
     }
     atomicAdd_double(&J[m * nao + n], sum);
 }
-__global__ void get_rho_kernel(int nao, int ngrid, const double *dm, const double *ao, double *rho_out) {
-    int g = blockIdx.x * blockDim.x + threadIdx.x;
-    if (g >= ngrid) return;
-    const double *phi_g = ao + (size_t)g * nao;
-    double r = 0.0;
-    for (int u = 0; u < nao; ++u) {
-        double phiu = phi_g[u];
-        const double *dm_row = dm + (size_t)u * nao;
-        for (int v = 0; v < nao; ++v) r += dm_row[v] * phiu * phi_g[v];
-    }
-    rho_out[g] = r;
-}
 
 /* ---------- Host Functions ---------- */
 
