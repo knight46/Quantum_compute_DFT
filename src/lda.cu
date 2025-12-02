@@ -1,4 +1,3 @@
-/* dft_cuda.cpp  -- CUDA-accelerated version with pointer-safety and double-atomic fallback */
 #include <cmath>
 #include <cstring>
 #include <cstdlib>
@@ -24,7 +23,6 @@ do {                                                                 \
 } while(0)
 
 
-/* ---------- 1. LDA VWN 参数 ---------- */
 struct VWNPar {
     double A, b, c, x0;
 };
@@ -115,19 +113,18 @@ __global__ void build_vxc_matrix_kernel(int nao, int rows,
                                         const double *ao_b,   // (rows, nao)
                                         const double *w_b,    // (rows)
                                         const double *vxc_b,  // (rows)
-                                        double *vxc_mat)      // 全局 (nao, nao)
+                                        double *vxc_mat)     
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= rows * nao) return;
     int im = idx / nao;        // 0..rows-1
     int i  = idx % nao;
-    int g  = g0 + im;          // 全局网格指标
+    int g  = g0 + im;         
 
     double aoi = ao_b[im * nao + i];
     double w   = w_b[im];
     double vxc = vxc_b[im];
 
-    /* 对 j 循环展开，原子加 */
     for (int j = 0; j < nao; ++j) {
         double aoj = ao_b[im * nao + j];
         double contrib = w * vxc * aoi * aoj;
@@ -169,14 +166,14 @@ __global__ void get_rho_kernel(int nao,
 __global__ void build_coulomb_kernel(int nao, int rows_m, int m0,
                                      const double *eri_slice, // (rows_m,nao,nao,nao)
                                      const double *dm,
-                                     double *J)               // 全局 (nao,nao)
+                                     double *J)               
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int tot = rows_m * nao;
     if (idx >= tot) return;
     int im = idx / nao;        // 0..rows_m-1
     int n  = idx % nao;
-    int m  = m0 + im;          // 全局 m 指标
+    int m  = m0 + im;          
 
     double sum = 0.0;
     for (int l = 0; l < nao; ++l) {
@@ -272,13 +269,11 @@ double compute_exc_energy(int ngrid,
                           const double *weights,
                           const double *rho)
 {
-    /* ---------- 1. 查剩余显存 ---------- */
     size_t free_byte = 0, total_byte = 0;
     CUDA_CHECK(cudaMemGetInfo(&free_byte, &total_byte));
-    const size_t SAFE_FREE = free_byte * 0.9;          // 留 10 % 安全垫
+    const size_t SAFE_FREE = free_byte * 0.9;          
 
-    /* ---------- 2. 算每块最多多少行 ---------- */
-    const size_t aux_buf   = 64 * 1024 * 1024;         // 64 MB 其它缓冲
+    const size_t aux_buf   = 64 * 1024 * 1024;         
     const size_t per_row   = 3 * sizeof(double);       // rho + weights + exc
     const size_t left_byte = (SAFE_FREE > aux_buf) ? (SAFE_FREE - aux_buf) : 0;
     if (left_byte == 0) {
@@ -293,7 +288,6 @@ double compute_exc_energy(int ngrid,
     //           << "  free=" << free_byte/1024/1024 << " MB"
     //           << "  block_rows=" << block_rows << std::endl;
 
-    /* ---------- 3. 分配 device 内存（复用缓冲） ---------- */
     double *d_rho_b   = nullptr;
     double *d_w_b     = nullptr;
     double *d_exc_b   = nullptr;
@@ -303,17 +297,14 @@ double compute_exc_energy(int ngrid,
     CUDA_CHECK(cudaMalloc(&d_exc_b,   block_rows * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_sum_b,   sizeof(double)));
 
-    /* ---------- 4. 把 VWN 参数拷进 constant memory ---------- */
     copy_vwn_params_to_device();
 
-    /* ---------- 5. 分块计算 ---------- */
     const int BLOCK = 256;
     double exc_total = 0.0;
     for (int g0 = 0; g0 < ngrid; g0 += block_rows) {
         int g1 = std::min(g0 + (int)block_rows, ngrid);
         int rows = g1 - g0;
 
-        /* 5a. H2D 拷当前子块 */
         CUDA_CHECK(cudaMemcpyAsync(d_rho_b, rho + g0,     rows * sizeof(double),
                                    cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpyAsync(d_w_b,   weights + g0, rows * sizeof(double),
@@ -333,7 +324,6 @@ double compute_exc_energy(int ngrid,
         CUDA_CHECK(cudaDeviceSynchronize());
     }
 
-    /* ---------- 6. 清理 ---------- */
     CUDA_CHECK(cudaFree(d_rho_b));
     CUDA_CHECK(cudaFree(d_w_b));
     CUDA_CHECK(cudaFree(d_exc_b));
@@ -350,12 +340,12 @@ void build_coulomb_matrix(int nao,
 {
     size_t free_byte = 0, total_byte = 0;
     CUDA_CHECK(cudaMemGetInfo(&free_byte, &total_byte));
-    const size_t SAFE_FREE = free_byte * 0.9;   // 留 10 % 安全垫
+    const size_t SAFE_FREE = free_byte * 0.9;  
 
     const size_t dm_bytes   = (size_t)nao * nao * sizeof(double);
     const size_t j_bytes    = (size_t)nao * nao * sizeof(double);
-    const size_t aux_buf    = 128 * 1024 * 1024;  // 128 MB 其它缓冲
-    const size_t eri_row3   = (size_t)nao * nao * nao * sizeof(double); // 一个 m 切片
+    const size_t aux_buf    = 128 * 1024 * 1024;  
+    const size_t eri_row3   = (size_t)nao * nao * nao * sizeof(double);
     const size_t left_bytes = (SAFE_FREE > dm_bytes + j_bytes + aux_buf) ?
                               (SAFE_FREE - dm_bytes - j_bytes - aux_buf) : 0;
     if (left_bytes == 0) {
@@ -369,7 +359,7 @@ void build_coulomb_matrix(int nao,
 
     double *d_dm = nullptr;
     double *d_J  = nullptr;
-    double *d_eri_slice = nullptr;  // 只存 [block_m][nao][nao][nao]
+    double *d_eri_slice = nullptr;  
     CUDA_CHECK(cudaMalloc(&d_dm, dm_bytes));
     CUDA_CHECK(cudaMalloc(&d_J,  j_bytes));
     CUDA_CHECK(cudaMalloc(&d_eri_slice, block_m * eri_row3));
@@ -377,20 +367,16 @@ void build_coulomb_matrix(int nao,
     CUDA_CHECK(cudaMemcpy(d_dm, dm, dm_bytes, cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemset(d_J, 0, j_bytes));
 
-    /* ---------- 4. 分块计算 ---------- */
     const int BLOCK = 256;
     for (int m0 = 0; m0 < nao; m0 += block_m) {
         int m1 = std::min(m0 + (int)block_m, nao);
-        int rows = m1 - m0;  // 本次 m 方向行数
+        int rows = m1 - m0;  
 
-        /* 4a. H2D 拷 eri 切片: m 方向 [m0:m1] 全部 n,l,s */
         CUDA_CHECK(cudaMemcpyAsync(d_eri_slice,
                                    eri + (size_t)m0 * nao * nao * nao,
                                    (size_t)rows * eri_row3,
                                    cudaMemcpyHostToDevice));
 
-        /* 4b. 对当前切片调用原内核，但把 “nao” 当成 “rows” 传进去，
-              同时把全局偏移 m0 传进内核，让线程算出绝对 m 指标 */
         int grid = ((rows * nao) + BLOCK - 1) / BLOCK;
         build_coulomb_kernel<<<grid, BLOCK>>>(
                 nao, rows, m0, d_eri_slice, d_dm, d_J);
@@ -398,7 +384,6 @@ void build_coulomb_matrix(int nao,
         CUDA_CHECK(cudaDeviceSynchronize());
     }
 
-    /* ---------- 5. 拷回结果 & 清理 ---------- */
     CUDA_CHECK(cudaMemcpy(J, d_J, j_bytes, cudaMemcpyDeviceToHost));
 
     CUDA_CHECK(cudaFree(d_dm));
