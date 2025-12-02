@@ -7,7 +7,7 @@ from pyscf import gto, dft
 from grid import build, get_ao_grad
 
 # ---------------- 载入 CUDA 共享库 -----------------
-libname = {'linux':'mxgga.so',
+libname = {'linux':'gga.so',
            'darwin':'libgga.so',
            'win32':'dft.dll'}[sys.platform]
 lib = ctypes.CDLL(os.path.abspath(libname))
@@ -84,13 +84,11 @@ def get_rho_grad(dm, ao_values, ao_grad):
                       np.ascontiguousarray(ao_grad,  dtype=np.float64),
                       rho, sigma, grad_rho) # Pass NEW arg
     
-    # 调试打印 (可选)
-    # print('first 10 rho:', rho[:10])
-    
-    # 保险 clamp
     rho   = np.clip(rho,   1e-12, None)
-    sigma = np.clip(sigma, 0.0, 1e4)
+    # sigma = np.clip(sigma, 0.0, 1e4)
     return rho, sigma, grad_rho
+
+
 
 def build_vxc_matrix(dm, ao_values, ao_grad, grids):
     rho, sigma, grad_rho = get_rho_grad(dm, ao_values, ao_grad)
@@ -149,21 +147,18 @@ def adaptive_mixing(dm_new, dm_old, cycle, dm_change):
 
 
 
-# ===================================================
-#  主程序
-# ===================================================
 if __name__ == "__main__":
-    # ---- 0. 读入分子与网格 ----
-    with open("./atom_txt/c4h10.txt", "r") as f:
+    atom = "c4h10"
+    with open(f"./atom_txt/{atom}.txt", "r") as f:
         atom_structure = f.read()
-    grid_add = "./grid_txt/C4H10_grid.txt"
+    grid_add = f"./grid_txt/{atom}_grid.txt"
     Hcore, S, nocc, T, eri, ao_values, grids, E_nuc = build(atom_structure, grid_add)
-    print(f'Python ao_values[0,0] = {ao_values[0,0]:.6f}')
+
 
 
     mol = gto.Mole()
     mol.atom = atom_structure
-    mol.basis = 'sto-3g'
+    mol.basis = 'sto-6g'
     mol.build()
     print(f'1st atom R = {mol.atom_coord(0)}')     # 第一个原子坐标
     r0 = mol.atom_coord(0)
@@ -208,6 +203,7 @@ if __name__ == "__main__":
         t4 = time.time()
         Exc_time.append(t4 - t3)
 
+        # E_tot = E_one + E_coul + E_xc + E_nuc + 0.02398*E_xc
         E_tot = E_one + E_coul + E_xc + E_nuc
         dE    = E_tot - E_old
         dm_change = np.linalg.norm(dm_new - dm)
@@ -218,9 +214,12 @@ if __name__ == "__main__":
             converged = True
             end_time = time.time()
             print(f"SCF converged! E = {E_tot:.8f} Hartree")
+            print(f' E_one  : {E_one:.6f} Hartree')
+            print(f' E_coul : {E_coul:.6f} Hartree')
+            print(f' E_exc  : {E_xc:.6f} Hartree')
             print(f"Vxc_average_time: {sum(Vxc_time)/len(Vxc_time)*1000:.6f} ms")
             print(f"Exc_average_time: {sum(Exc_time)/len(Exc_time)*1000:.6f} ms")
-            print(f"Total time: {end_time - start_time:.6f} s")
+            print(f"Total time: {end_time - start_time:.6f} s\n")
             break
 
         dm = adaptive_mixing(dm_new, dm, cycle, dm_change)
@@ -249,9 +248,11 @@ if __name__ == "__main__":
     Etot  = mf.energy_tot()
     elapsed = time.time() - start
 
-    print('\nPySCF (PBE) reference:')
+    print('PySCF (PBE) reference:')
     print(f' E_one  : {E1:.6f} Hartree')
     print(f' E_coul : {Ecoul:.6f} Hartree')
     print(f' E_exc  : {Exc:.6f} Hartree')
     print(f' E_tot  : {Etot:.8f} Hartree')
     print(f' time   : {elapsed:.6f} s')
+
+
