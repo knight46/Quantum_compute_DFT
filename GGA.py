@@ -148,7 +148,7 @@ def adaptive_mixing(dm_new, dm_old, cycle, dm_change):
 
 
 if __name__ == "__main__":
-    atom = "c4h10"
+    atom = "h2o"
     with open(f"./atom_txt/{atom}.txt", "r") as f:
         atom_structure = f.read()
     grid_add = f"./grid_txt/{atom}_grid.txt"

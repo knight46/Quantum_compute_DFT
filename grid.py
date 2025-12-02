@@ -38,8 +38,8 @@ def get_ao_grad(atom_structure, grids):
     mol.build()
     # eval_ao 返回 [1+3, ngrid, nao]；索引 1:4 即为 ∇AO
     ao_all = dft.numint.eval_ao(mol, grids.coords, deriv=1)
-    ao_grad = ao_all[1:4].transpose(1, 0, 2)  # (3, ngrid, nao) -> (ngrid, 3, nao)
-    return ao_grad
+
+    return ao_all[1:4]
 
 def init_gridpy(mol, grid_level=3):
     grids = dft.gen_grid.Grids(mol)
