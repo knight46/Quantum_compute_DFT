@@ -522,24 +522,6 @@ void build_coulomb_matrix(int nao, const double *eri, const double *dm, double *
     CUDA_CHECK(cudaFree(d_dm)); CUDA_CHECK(cudaFree(d_J)); CUDA_CHECK(cudaFree(d_eri));
 }
 
-void get_rho(int nao, int ngrid, const double *dm, const double *ao, double *rho_out) {
-    size_t free, total; CUDA_CHECK(cudaMemGetInfo(&free, &total));
-    size_t rows_per = (free * 0.9 - nao * nao * sizeof(double)) / (nao * sizeof(double) + sizeof(double));
-    if (rows_per < 1) rows_per = 1; if (rows_per > ngrid) rows_per = ngrid;
-    double *d_dm, *d_ao, *d_rho;
-    CUDA_CHECK(cudaMalloc(&d_dm, nao * nao * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_ao, rows_per * nao * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_rho, rows_per * sizeof(double)));
-    CUDA_CHECK(cudaMemcpy(d_dm, dm, nao * nao * sizeof(double), cudaMemcpyHostToDevice));
-    for (int g0 = 0; g0 < ngrid; g0 += rows_per) {
-        int g1 = std::min(g0 + (int)rows_per, ngrid); int rows = g1 - g0;
-        CUDA_CHECK(cudaMemcpyAsync(d_ao, ao + g0 * nao, rows * nao * sizeof(double), cudaMemcpyHostToDevice));
-        int grid = (rows + 127) / 128;
-        get_rho_kernel<<<grid, 128>>>(nao, rows, d_dm, d_ao, d_rho);
-        CUDA_CHECK(cudaMemcpyAsync(rho_out + g0, d_rho, rows * sizeof(double), cudaMemcpyDeviceToHost));
-    }
-    CUDA_CHECK(cudaFree(d_dm)); CUDA_CHECK(cudaFree(d_ao)); CUDA_CHECK(cudaFree(d_rho));
-}
 
 } // extern "C"
 

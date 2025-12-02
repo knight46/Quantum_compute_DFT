@@ -45,12 +45,6 @@ lib.solve_fock_eigen.argtypes = [ctypes.c_int,
                                  np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS')]
 lib.solve_fock_eigen.restype = None
 
-lib.get_rho.argtypes = [ctypes.c_int, ctypes.c_int,
-                        np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS'),
-                        np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS'),
-                        np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS')]
-lib.get_rho.restype = None
-
 lib.get_rho_sigma.restype = None
 lib.get_rho_sigma.argtypes = [
     ctypes.c_int,
