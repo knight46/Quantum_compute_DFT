@@ -240,7 +240,6 @@ __global__ void get_rho_sigma_kernel_planar(int nao, int rows,
             
             r += dm_val * phiu * phiv;
             
-            // 梯度计算公式
             double term_x = dx_u * phiv + phiu * gphi_x[v];
             double term_y = dy_u * phiv + phiu * gphi_y[v];
             double term_z = dz_u * phiv + phiu * gphi_z[v];
@@ -254,15 +253,7 @@ __global__ void get_rho_sigma_kernel_planar(int nao, int rows,
     rho[g] = r;
     double s = gr_x*gr_x + gr_y*gr_y + gr_z*gr_z;
     sigma[g] = s;
-    
-    // --- 核心区域探针 ---
-    // 只有当密度足够大（原子核附近）且是第一个线程时打印，避免刷屏
-    // if (r > 1.0 && g % 1000 == 0) {
-    //      // 检查梯度是否异常小
-    //      printf("DEBUG CORE [Grid %d]: Rho=%.4f, Sigma=%.4e. Grad=(%.2e, %.2e, %.2e). gphi_x[0]=%.2e\n", 
-    //             g, r, s, gr_x, gr_y, gr_z, gphi_x[0]);
-    // }
-    // ------------------
+
 
     if(grad_rho_out){
         grad_rho_out[g*3+0] = gr_x;

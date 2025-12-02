@@ -1,4 +1,4 @@
-# gga.py  – 与 gga.cu 配套的驱动脚本
+
 import numpy as np
 from scipy.linalg import eigh
 import sys, ctypes, os, time
@@ -6,7 +6,6 @@ from datetime import timedelta
 from pyscf import gto, dft
 from grid import build, get_ao_grad
 
-# ---------------- 载入 CUDA 共享库 -----------------
 libname = {'linux':'./weights/gga.so',
            'darwin':'libgga.so',
            'win32':'dft.dll'}[sys.platform]
@@ -33,7 +32,6 @@ lib.compute_exc_energy_gga.argtypes = [
     np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS')]  # sigma
 lib.compute_exc_energy_gga.restype = ctypes.c_double
 
-# -------- 3. 其余接口与 dft_cuda.cpp 相同 ----------
 lib.build_coulomb_matrix.argtypes = [ctypes.c_int,
                                      np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS'),
                                      np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS'),
@@ -65,14 +63,10 @@ lib.get_rho_sigma.argtypes = [
     np.ctypeslib.ndpointer(dtype=np.float64, flags='C'),  # grad_rho (NEW)
 ]
 
-# ===================================================
-#  工具函数
-# ===================================================
+
 
 def get_rho_grad(dm, ao_values, ao_grad):
-    """
-    返回 rho, sigma, grad_rho
-    """
+
     ngrid, nao = ao_values.shape
     rho   = np.empty(ngrid, dtype=np.float64)
     sigma = np.empty(ngrid, dtype=np.float64)
@@ -95,7 +89,7 @@ def build_vxc_matrix(dm, ao_values, ao_grad, grids):
     nao, ngrid = ao_values.shape[1], ao_values.shape[0]
 
     ao_c   = np.ascontiguousarray(ao_values,  dtype=np.float64)
-    aograd_c = np.ascontiguousarray(ao_grad, dtype=np.float64) # 只要是 contig 即可，C++会按指针算
+    aograd_c = np.ascontiguousarray(ao_grad, dtype=np.float64)
     w_c    = np.ascontiguousarray(grids.weights, dtype=np.float64)
     rho_c  = np.ascontiguousarray(rho,  dtype=np.float64)
     sig_c  = np.ascontiguousarray(sigma, dtype=np.float64)
@@ -153,28 +147,11 @@ if __name__ == "__main__":
         atom_structure = f.read()
     grid_add = f"./grid_txt/{atom}_grid.txt"
     Hcore, S, nocc, T, eri, ao_values, grids, E_nuc = build(atom_structure, grid_add)
-
-
-
-    mol = gto.Mole()
-    mol.atom = atom_structure
-    mol.basis = 'sto-3g'
-    mol.build()
-    print(f'1st atom R = {mol.atom_coord(0)}')     # 第一个原子坐标
-    r0 = mol.atom_coord(0)
-    dist = np.linalg.norm(grids.coords - r0, axis=1)
-    ig_min = dist.argmin()
-    print(f'closest grid to atom-0: ig={ig_min}, dist={dist[ig_min]:.3f}')
-    print(f'ao_values[ig_min,0] = {ao_values[ig_min,0]:.6f}')
-
-
-    # Hcore, S, nocc, T, eri, ao_values, grids, E_nuc
     ao_grad = get_ao_grad(atom_structure, grids)
-    # ---- 初始猜测 ----
+
     e_init, C_init = eigh(Hcore, S)
     dm = 2 * C_init[:, :nocc] @ C_init[:, :nocc].T
     start_time = time.time()
-    print(f'|dm|_F = {np.linalg.norm(dm):.6f},  dm max = {dm.max():.6f}')
     print("\nSCF started!")
     print("-" * 70)
     print(f"{'epoch':>4} {'tot energy':>15} {'Δenergy':>12} {'Δdensity':>12}")
@@ -203,7 +180,6 @@ if __name__ == "__main__":
         t4 = time.time()
         Exc_time.append(t4 - t3)
 
-        # E_tot = E_one + E_coul + E_xc + E_nuc + 0.02398*E_xc
         E_tot = E_one + E_coul + E_xc + E_nuc
         dE    = E_tot - E_old
         dm_change = np.linalg.norm(dm_new - dm)
@@ -228,7 +204,6 @@ if __name__ == "__main__":
     if not converged:
         print("Warning: SCF unconverged!")
 
-    # ---------------- PySCF 对照组（GGA-PBE） ----------------
     mol = gto.Mole()
     mol.atom = atom_structure
     mol.basis = 'sto-3g'
@@ -236,7 +211,7 @@ if __name__ == "__main__":
 
     start = time.time()
     mf = dft.RKS(mol)
-    mf.xc = 'PBE'          # ← GGA
+    mf.xc = 'PBE'       
     mf.kernel()
     dm = mf.make_rdm1()
 

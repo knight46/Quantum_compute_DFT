@@ -241,21 +241,16 @@ if __name__ == "__main__":
     mf = LDA(mol)
     dm = mf.make_rdm1()
 
-    # 一电子项（动能 + 核吸引）
     h1 = mol.intor('int1e_kin') + mol.intor('int1e_nuc')
     E_one = np.einsum('ij,ji->', h1, dm)
 
-    # Hartree + XC 势
     veff = mf.get_veff(mol, dm)
 
-    # Coulomb 能量 (0.5 * ρV_H)
     vh = mf.get_j(mol, dm)
     E_coul = 0.5 * np.einsum('ij,ji->', vh, dm)
 
-    # 交换-相关能量
     E_exc = mf.energy_elec()[0] - (E_one + E_coul)
 
-    # 总能量
     E_tot = mf.energy_tot()
     end_time = time.time()
     cost_time = end_time - start_time

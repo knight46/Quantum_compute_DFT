@@ -1,42 +1,51 @@
-# LDA
+# LDA(Local Density Approximation)
 
-## 编译 CUDA 文件
+## Compile CUDA Source Files
 
-### arch架构1 (4060...)
+### Target Architecture 1 (e.g., RTX 4060) - Compute Capability 8.6
 `nvcc -shared -o ./weights/lda.so ./src/lda.cu -Xcompiler -fPIC -I/usr/include/eigen3 -gencode arch=compute_86,code=sm_86 -gencode arch=compute_86,code=compute_86`
 
-### arch架构2 (MX250...)
+### Target Architecture 2 (e.g., MX250) - Compute Capability 5.0
 `nvcc -shared -o ./weights/mxlda.so ./src.lda.cu -Xcompiler -fPIC -I/usr/include/eigen3 -gencode arch=compute_50,code=sm_50 -gencode arch=compute_50,code=compute_50`
 
 
-## 编译 C++ 文件
+## Compile C++ Source Files
 `g++ -shared -o ./weigths/liblda.so ./src/lda.cpp -I/usr/include/eigen3 -gencode arch=compute_86,code=sm_86 -gencode arch=compute_86,code=compute_86`
 
-## 运行 Python 脚本  
+## Run Python Script 
 
-使用arch架构1需要将文件LDA.py文件中上面libname中的linux改为lda.so
+Before running the script, update the library path in LDA.py:
 
-使用arch架构2需要将文件LDA.py文件中上面libname中的linux改为mxlda.so
+ - For Architecture 1: Change the `libname` (LDA.py:Linux) variable to `lda.so`.
+
+ - For Architecture 2: Change the `libname` (LDA.py:Linux) variable to `mxlda.so`.
+
+Execute the script:
 
 `python LDA.py`
 
 
-# GGA
-## 编译 CUDA 文件
+# GGA(Generalized Gradient Approximation)
 
-### arch架构1 (4060...)
+## Compile CUDA Source Files
+
+### Target Architecture 1 (e.g., RTX 4060) - Compute Capability 8.6
 `nvcc -shared -o ./weights/gga.so ./src/gga.cu -Xcompiler -fPIC -I/usr/include/eigen3 -gencode arch=compute_86,code=sm_86 -gencode arch=compute_86,code=compute_86`
 
-### arch架构2 (MX250...)
+### Target Architecture 2 (e.g., MX250) - Compute Capability 5.0
 `nvcc -shared -o ./weights/mxgga.so ./src/gga.cu -Xcompiler -fPIC -I/usr/include/eigen3 -gencode arch=compute_50,code=sm_50 -gencode arch=compute_50,code=compute_50`
 
-## 运行Python脚本
+## Run Python Script
 
-使用arch架构1需要将文件GGA.py文件中上面libname中的linux改为gga.so
+Before running the script, update the library path in LDA.py:
 
-使用arch架构2需要将文件GGA.py文件中上面libname中的linux改为mxgga.so
+ - For Architecture 1: Change the `libname` (GGA.py:Linux) variable to `gga.so`.
+
+ - For Architecture 2: Change the `libname` (GGA.py:Linux) variable to `mxgga.so`.
+
+Execute the script:
 
 `python GGA.py`
 
 
-**PS：** 文件内有各种分子坐标信息以及网格信息,可自行选择或添加
+**Note:** The files contain various molecular coordinate data and grid information. You may select existing configurations or append custom data as needed
