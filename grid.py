@@ -31,7 +31,6 @@ def get_ao_grad(atom_structure, grids):
     mol.spin = 0
     mol.build()
     ao_all = dft.numint.eval_ao(mol, grids.coords, deriv=1)
-
     return ao_all[1:4]
 
 def init_gridpy(mol, grid_level=3):
