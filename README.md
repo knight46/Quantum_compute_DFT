@@ -22,7 +22,7 @@ Before running the script, update the library path in LDA.py:
 
 Execute the script:
 
-`python LDA.py`
+`python LDA.py H2O`
 
 
 # GGA(Generalized Gradient Approximation)
@@ -45,7 +45,7 @@ Before running the script, update the library path in LDA.py:
 
 Execute the script:
 
-`python GGA.py`
+`python GGA.py Benzene`
 
 
 **Note:** The files contain various molecular coordinate data and grid information. You may select existing configurations or append custom data as needed

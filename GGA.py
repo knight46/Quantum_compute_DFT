@@ -5,6 +5,7 @@ import sys, ctypes, os, time
 from datetime import timedelta
 from pyscf import gto, dft
 from grid import build, get_ao_grad
+import argparse
 
 libname = {'linux':'./weights/gga.so',
            'darwin':'libgga.so',
@@ -136,9 +137,17 @@ def adaptive_mixing(dm_new, dm_old, cycle, dm_change):
 
 
 if __name__ == "__main__":
-    atom = "h2o"
-    with open(f"./atom_txt/{atom}.txt", "r") as f:
-        atom_structure = f.read()
+    parser = argparse.ArgumentParser(description="Run GGA calculation for a given molecule.")
+    parser.add_argument("molecule", type=str, help="Name of the molecule (e.g., h2o, dha)")
+    args = parser.parse_args()
+
+    atom = args.molecule.lower()
+    try:
+        with open(f"./atom_txt/{atom}.txt", "r") as f:
+            atom_structure = f.read()
+    except FileNotFoundError:
+        print(f"Error: No structure found for molecule {atom}.")
+        exit(1)
     grid_add = f"./grid_txt/{atom}_grid.txt"
     Hcore, S, nocc, T, eri, ao_values, grids, E_nuc = build(atom_structure, grid_add)
     ao_grad = get_ao_grad(atom_structure, grids)

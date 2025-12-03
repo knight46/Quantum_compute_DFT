@@ -6,6 +6,7 @@ from grid import build
 from pyscf import gto, dft
 import time
 from datetime import timedelta
+import argparse
 
 
 libname = {'linux':'./weights/lda.so',
@@ -160,11 +161,17 @@ def adaptive_mixing(dm_new, dm_old, cycle, dm_change):
     return mix_param * dm_new + (1 - mix_param) * dm_old
 
 if __name__ == "__main__": 
-    # ==== 0. Molecule Definition ====
-    atom = "h2o"
-    with open(f"./atom_txt/{atom}.txt", "r") as f:
-        atom_structure = f.read()
- 
+    parser = argparse.ArgumentParser(description="Run GGA calculation for a given molecule.")
+    parser.add_argument("molecule", type=str, help="Name of the molecule (e.g., h2o, dha)")
+    args = parser.parse_args()
+
+    atom = args.molecule.lower()
+    try:
+        with open(f"./atom_txt/{atom}.txt", "r") as f:
+            atom_structure = f.read()
+    except FileNotFoundError:
+        print(f"Error: No structure found for molecule {atom}.")
+        exit(1)
     grid_add = f"./grid_txt/{atom}_grid.txt"
     Hcore, S, nocc, T, eri, ao_values, grids, E_nuc = build(atom_structure, grid_add)
     e_init, C_init = eigh(Hcore, S)
