@@ -1,4 +1,3 @@
-
 import numpy as np
 from scipy.linalg import eigh
 import sys, ctypes, os, time
@@ -12,25 +11,23 @@ libname = {'linux':'./weights/gga.so',
            'win32':'dft.dll'}[sys.platform]
 lib = ctypes.CDLL(os.path.abspath(libname))
 
-# -------- 1. build_vxc_matrix_gga ----------
 lib.build_vxc_matrix_gga.argtypes = [
-    ctypes.c_int,                       # nao
-    ctypes.c_int,                       # ngrid
-    np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS'),  # ao
-    np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS'),  # ao_grad
-    np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS'),  # weights
-    np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS'),  # rho
-    np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS'),  # sigma
-    np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS'),  # grad_rho (NEW)
+    ctypes.c_int,
+    ctypes.c_int,
+    np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS'),
+    np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS'),
+    np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS'),
+    np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS'),
+    np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS'),
+    np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS'),
     np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS')]
 lib.build_vxc_matrix_gga.restype = None
 
-# -------- 2. compute_exc_energy_gga ----------
 lib.compute_exc_energy_gga.argtypes = [
     ctypes.c_int,
-    np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS'),  # weights
-    np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS'),  # rho
-    np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS')]  # sigma
+    np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS'),
+    np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS'),
+    np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS')]
 lib.compute_exc_energy_gga.restype = ctypes.c_double
 
 lib.build_coulomb_matrix.argtypes = [ctypes.c_int,
@@ -50,57 +47,46 @@ lib.get_rho_sigma.restype = None
 lib.get_rho_sigma.argtypes = [
     ctypes.c_int,
     ctypes.c_int,
-    np.ctypeslib.ndpointer(dtype=np.float64, flags='C'),  # dm
-    np.ctypeslib.ndpointer(dtype=np.float64, flags='C'),  # ao
-    np.ctypeslib.ndpointer(dtype=np.float64, flags='C'),  # ao_grad
-    np.ctypeslib.ndpointer(dtype=np.float64, flags='C'),  # rho
-    np.ctypeslib.ndpointer(dtype=np.float64, flags='C'),  # sigma
-    np.ctypeslib.ndpointer(dtype=np.float64, flags='C'),  # grad_rho (NEW)
+    np.ctypeslib.ndpointer(dtype=np.float64, flags='C'),
+    np.ctypeslib.ndpointer(dtype=np.float64, flags='C'),
+    np.ctypeslib.ndpointer(dtype=np.float64, flags='C'),
+    np.ctypeslib.ndpointer(dtype=np.float64, flags='C'),
+    np.ctypeslib.ndpointer(dtype=np.float64, flags='C'),
+    np.ctypeslib.ndpointer(dtype=np.float64, flags='C'),
 ]
 
-
-
 def get_rho_grad(dm, ao_values, ao_grad):
-
     ngrid, nao = ao_values.shape
     rho   = np.empty(ngrid, dtype=np.float64)
     sigma = np.empty(ngrid, dtype=np.float64)
-    grad_rho = np.empty((ngrid, 3), dtype=np.float64) # NEW
-
+    grad_rho = np.empty((ngrid, 3), dtype=np.float64)
     lib.get_rho_sigma(nao, ngrid,
                       np.ascontiguousarray(dm, dtype=np.float64),
                       np.ascontiguousarray(ao_values, dtype=np.float64),
                       np.ascontiguousarray(ao_grad,  dtype=np.float64),
-                      rho, sigma, grad_rho) # Pass NEW arg
-    
+                      rho, sigma, grad_rho)
     rho   = np.clip(rho,   1e-12, None)
-    # sigma = np.clip(sigma, 0.0, 1e4)
     return rho, sigma, grad_rho
-
-
 
 def build_vxc_matrix(dm, ao_values, ao_grad, grids):
     rho, sigma, grad_rho = get_rho_grad(dm, ao_values, ao_grad)
     nao, ngrid = ao_values.shape[1], ao_values.shape[0]
-
     ao_c   = np.ascontiguousarray(ao_values,  dtype=np.float64)
     aograd_c = np.ascontiguousarray(ao_grad, dtype=np.float64)
     w_c    = np.ascontiguousarray(grids.weights, dtype=np.float64)
     rho_c  = np.ascontiguousarray(rho,  dtype=np.float64)
     sig_c  = np.ascontiguousarray(sigma, dtype=np.float64)
-    grho_c = np.ascontiguousarray(grad_rho, dtype=np.float64) # NEW
+    grho_c = np.ascontiguousarray(grad_rho, dtype=np.float64)
     vxc_mat = np.empty((nao, nao), dtype=np.float64, order='C')
-
     lib.build_vxc_matrix_gga(nao, ngrid, ao_c, aograd_c, w_c, rho_c, sig_c, grho_c, vxc_mat)
     return vxc_mat
 
 def compute_exc_energy(dm, ao_values, ao_grad, grids):
-    rho, sigma, _ = get_rho_grad(dm, ao_values, ao_grad) # Ignore grad_rho here
+    rho, sigma, _ = get_rho_grad(dm, ao_values, ao_grad)
     w_c   = np.ascontiguousarray(grids.weights, dtype=np.float64)
     rho_c = np.ascontiguousarray(rho,  dtype=np.float64)
     sig_c = np.ascontiguousarray(sigma, dtype=np.float64)
     return lib.compute_exc_energy_gga(len(grids.coords), w_c, rho_c, sig_c)
-
 
 def build_coulomb_matrix(dm, eri):
     nao = dm.shape[0]
@@ -109,7 +95,6 @@ def build_coulomb_matrix(dm, eri):
     J = np.empty((nao, nao), dtype=np.float64, order='C')
     lib.build_coulomb_matrix(nao, eri_c, dm_c, J)
     return J
-
 
 def solve_fock_equation(F, S):
     n = F.shape[0]
@@ -122,7 +107,6 @@ def solve_fock_equation(F, S):
     C = C.reshape(n, n).T
     return e, C
 
-
 def adaptive_mixing(dm_new, dm_old, cycle, dm_change):
     if cycle < 10:
         mix_param = 0.1
@@ -134,21 +118,38 @@ def adaptive_mixing(dm_new, dm_old, cycle, dm_change):
         mix_param = 0.5
     return mix_param * dm_new + (1 - mix_param) * dm_old
 
-
+def load_xyz_as_pyscf_atom(xyz_path):
+    with open(xyz_path, "r") as f:
+        lines = f.readlines()
+    atom_lines = lines[2:]
+    atom_list = []
+    for line in atom_lines:
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        sym = parts[0]
+        x, y, z = parts[1:4]
+        atom_list.append(f"{sym} {x} {y} {z}")
+    return "\n".join(atom_list)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run GGA calculation for a given molecule.")
-    parser.add_argument("molecule", type=str, help="Name of the molecule (e.g., h2o, dha)")
+    parser.add_argument("xyzfile", type=str, help="Name of the molecule (e.g., h2o, dha)")
     args = parser.parse_args()
 
-    atom = args.molecule.lower()
+    atom = args.xyzfile
+    if not atom.lower().endswith(".xyz"):
+        atom += ".xyz"
+
     try:
-        with open(f"./atom_txt/{atom}.txt", "r") as f:
-            atom_structure = f.read()
+        with open(f"./atom_txt/{atom}", "r") as f:
+            pass
     except FileNotFoundError:
         print(f"Error: No structure found for molecule {atom}.")
         exit(1)
+
     grid_add = f"./grid_txt/{atom}_grid.txt"
+    atom_structure = load_xyz_as_pyscf_atom(f"./atom_txt/{atom}")
     Hcore, S, nocc, T, eri, ao_values, grids, E_nuc = build(atom_structure, grid_add)
     ao_grad = get_ao_grad(atom_structure, grids)
 
@@ -166,7 +167,6 @@ if __name__ == "__main__":
 
     for cycle in range(100):
         J = build_coulomb_matrix(dm, eri)
-
         t1 = time.time()
         Vxc = build_vxc_matrix(dm, ao_values, ao_grad, grids)
         t2 = time.time()
@@ -174,15 +174,12 @@ if __name__ == "__main__":
         F = Hcore + J + Vxc
         e, C = solve_fock_equation(F, S)
         dm_new = 2 * C[:, :nocc] @ C[:, :nocc].T
-
         E_one  = np.einsum('ij,ji->', dm_new, Hcore)
         E_coul = 0.5 * np.einsum('ij,ji->', dm_new, J)
-
         t3 = time.time()
         E_xc = compute_exc_energy(dm_new, ao_values, ao_grad, grids)
         t4 = time.time()
         Exc_time.append(t4 - t3)
-
         E_tot = E_one + E_coul + E_xc + E_nuc
         dE    = E_tot - E_old
         dm_change = np.linalg.norm(dm_new - dm)
@@ -214,7 +211,7 @@ if __name__ == "__main__":
 
     start = time.time()
     mf = dft.RKS(mol)
-    mf.xc = 'PBE'       
+    mf.xc = 'PBE'
     mf.kernel()
     dm = mf.make_rdm1()
 
@@ -232,5 +229,3 @@ if __name__ == "__main__":
     print(f' E_exc  : {Exc:.6f} Hartree')
     print(f' E_tot  : {Etot:.8f} Hartree')
     print(f' time   : {elapsed:.6f} s')
-
-

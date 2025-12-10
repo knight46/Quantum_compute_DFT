@@ -14,16 +14,6 @@ libname = {'linux':'./weights/lda.so',
            'win32':'dft.dll'}[sys.platform]
 lib = ctypes.CDLL(os.path.abspath(libname))
 
-# ---------- 1. lda_exc_vxc ----------
-# lib.lda_exc_vxc.argtypes = [
-#     ctypes.c_int,
-#     np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS'),
-#     np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS'),
-#     np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS')
-# ]
-# lib.lda_exc_vxc.restype = None
-
-# ---------- 2. build_vxc_matrix ----------
 lib.build_vxc_matrix.argtypes = [
     ctypes.c_int, ctypes.c_int,
     np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS'),
@@ -33,7 +23,6 @@ lib.build_vxc_matrix.argtypes = [
 ]
 lib.build_vxc_matrix.restype = None
 
-# ---------- 3. compute_exc_energy ----------
 lib.compute_exc_energy.argtypes = [
     ctypes.c_int,
     np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS'),
@@ -41,7 +30,6 @@ lib.compute_exc_energy.argtypes = [
 ]
 lib.compute_exc_energy.restype = ctypes.c_double
 
-# ---------- 4. build_coulomb_matrix ----------
 lib.build_coulomb_matrix.argtypes = [
     ctypes.c_int,
     np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS'),
@@ -68,10 +56,6 @@ lib.get_rho.argtypes = [
 lib.get_rho.restype = None
 
 
-
-# ==== 2. Build LDA exchange-correlation functional ====
-
-
 def lda_exc_vxc(rho):
     rho = np.asarray(rho, dtype=np.float64, order='C')
     n = rho.size
@@ -80,9 +64,6 @@ def lda_exc_vxc(rho):
     lib.lda_exc_vxc(n, rho, exc, vxc)
     return exc, vxc
 
-
-
-# ==== 3. Compute density on grid ====
 
 def get_rho(dm, ao_values):
     nao, ngrid = ao_values.shape[1], ao_values.shape[0]
@@ -94,7 +75,6 @@ def get_rho(dm, ao_values):
     return rho
 
 
-# ==== 4. Build Vxc matrix ====
 def build_vxc_matrix(dm, ao_values, grids):
     rho = get_rho(dm, ao_values)
     nao   = ao_values.shape[1]
@@ -104,18 +84,16 @@ def build_vxc_matrix(dm, ao_values, grids):
     w_c   = np.ascontiguousarray(grids.weights, dtype=np.float64)
     rho_c = np.ascontiguousarray(rho, dtype=np.float64)
     vxc_mat = np.empty((nao, nao), dtype=np.float64, order='C')
-    # print(f"nao:{nao}, ngrid:{ngrid},ao_c:{ao_c.shape}, w_c:{w_c.shape}, rho_c:{rho_c.shape}, vxc_mat:{vxc_mat.shape}")
-    # test = input("t")
     lib.build_vxc_matrix(nao, ngrid, ao_c, w_c, rho_c, vxc_mat)
     return vxc_mat
 
 
-# ==== 5. Compute Exc energy ====
 def compute_exc_energy(dm, ao_values, grids):
     rho = get_rho(dm, ao_values)
     rho_c = np.ascontiguousarray(rho, dtype=np.float64)
     w_c   = np.ascontiguousarray(grids.weights, dtype=np.float64)
     return lib.compute_exc_energy(len(grids.coords), w_c, rho_c)
+
 
 def build_coulomb_matrix(dm, eri):
     nao = dm.shape[0]
@@ -124,6 +102,7 @@ def build_coulomb_matrix(dm, eri):
     J = np.empty((nao, nao), dtype=np.float64, order='C')
     lib.build_coulomb_matrix(nao, eri_c, dm_c, J)
     return J
+
 
 def solve_fock_equation(F, S):
     n = F.shape[0]
@@ -134,21 +113,27 @@ def solve_fock_equation(F, S):
                          np.ascontiguousarray(S, dtype=np.float64),
                          e, C)
     C = C.reshape(n, n).T
-
     return e, C
 
 
-# def LDA(mol):
+def load_xyz_as_pyscf_atom(xyz_path):
+    with open(xyz_path, "r") as f:
+        lines = f.readlines()
 
-#     mf = dft.RKS(mol)
-#     mf.xc = 'LDA,VWN'  
-#     energy = mf.kernel()
-#     return mf
+    atom_lines = lines[2:]
+    atom_list = []
+    for line in atom_lines:
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        sym = parts[0]
+        x, y, z = parts[1:4]
+        atom_list.append(f"{sym} {x} {y} {z}")
+
+    return "\n".join(atom_list)
+
 
 def adaptive_mixing(dm_new, dm_old, cycle, dm_change):
-    """
-    自适应密度混合
-    """
     if cycle < 10:
         mix_param = 0.1
     elif dm_change > 1e-3:
@@ -157,32 +142,38 @@ def adaptive_mixing(dm_new, dm_old, cycle, dm_change):
         mix_param = 0.3
     else:
         mix_param = 0.5
-    
     return mix_param * dm_new + (1 - mix_param) * dm_old
 
-if __name__ == "__main__": 
-    parser = argparse.ArgumentParser(description="Run GGA calculation for a given molecule.")
-    parser.add_argument("molecule", type=str, help="Name of the molecule (e.g., h2o, dha)")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Run LDA calculation for a given molecule.")
+    parser.add_argument("xyzfile", type=str, help="Name of the molecule (e.g., h2o.xyz)")
     args = parser.parse_args()
 
-    atom = args.molecule.lower()
+    atom = args.xyzfile.lower()
+    if not atom.endswith(".xyz"):
+        atom += ".xyz"
+
+    xyz_path = f"./atom_txt/{atom}"
+
     try:
-        with open(f"./atom_txt/{atom}.txt", "r") as f:
-            atom_structure = f.read()
+        atom_structure = load_xyz_as_pyscf_atom(xyz_path)
     except FileNotFoundError:
         print(f"Error: No structure found for molecule {atom}.")
         exit(1)
+
     grid_add = f"./grid_txt/{atom}_grid.txt"
+
     Hcore, S, nocc, T, eri, ao_values, grids, E_nuc = build(atom_structure, grid_add)
     e_init, C_init = eigh(Hcore, S)
     dm = 2 * C_init[:, :nocc] @ C_init[:, :nocc].T
     start_time = time.time()
-    
+
     print(f"\nSCF started!")
     print("-" * 70)
     print(f"{'epoch':>4} {'tot energy':>15} {'Δenergy':>12} {'Δdensity':>12}")
     print("-" * 70)
-    
+
     converged = False
     E_old = 0.0
     Vxc_time = []
@@ -190,16 +181,13 @@ if __name__ == "__main__":
 
     for cycle in range(100):
         J = build_coulomb_matrix(dm, eri)
-        # break
         Vxc_start = time.time()
         Vxc = build_vxc_matrix(dm, ao_values, grids)
         Vxc_end = time.time()
         Vxc_time.append(Vxc_end - Vxc_start)
-        end = time.time()
-        # break
+
         F = Hcore + J + Vxc
         e, C = solve_fock_equation(F, S)
-        # break
         dm_new = 2 * C[:, :nocc] @ C[:, :nocc].T
 
         E_one = np.einsum('ij,ji->', dm_new, Hcore)
@@ -209,7 +197,7 @@ if __name__ == "__main__":
         Exc_end = time.time()
         Exc_time.append(Exc_end - Exc_start)
         E_tot = E_one + E_coul + E_xc + E_nuc
-        
+
         dE = E_tot - E_old
         dm_change = np.linalg.norm(dm_new - dm)
 
@@ -217,18 +205,13 @@ if __name__ == "__main__":
 
         if abs(dE) < 1e-8 and dm_change < 1e-6:
             converged = True
-            # print("-" * 60)
-            # print(f"E_one:{E_one:.8f} Hartree")
-            # print(f"E_coul:{E_coul:.8f} Hartree")
-            # print(f"E_xc:{E_xc:.8f} Hartree")
-            # print(f"E_nuc:{E_nuc:.8f} Hartree")
             end_time = time.time()
             print(f"SCF converged! E = {E_tot:.8f} Hartree")
             print(f"Vxc_average_time: {(sum(Vxc_time)/len(Vxc_time)*1000):.6f} ms")
             print(f"Exc_average_time: {(sum(Exc_time)/len(Exc_time)*1000):.6f} ms")
             print(f"expense total time: {(end_time - start_time):.6f} s\n")
             break
-        
+
         dm = adaptive_mixing(dm_new, dm, cycle, dm_change)
         E_old = E_tot
 
@@ -240,11 +223,13 @@ if __name__ == "__main__":
     mol.basis = 'sto-3g'
     mol.build()
     start_time = time.time()
+
     def LDA(mol):
         mf = dft.RKS(mol)
-        mf.xc = 'LDA,VWN'  
+        mf.xc = 'LDA,VWN'
         energy = mf.kernel()
         return mf
+
     mf = LDA(mol)
     dm = mf.make_rdm1()
 
