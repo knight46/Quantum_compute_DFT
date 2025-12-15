@@ -1,14 +1,15 @@
 /*
- * gga.cu – PBE-GGA (Final Corrections)
- * 1. Precision: Aligned PBE Correlation with Libxc to fix 0.24Ha error.
- * 2. Stability: Added limits for small/large gradients in core regions.
- * 3. Layout: Planar memory layout for all kernels.
+ * gga.cu – PBE-GGA (Final Corrections & cuBLAS Optimization)
+ * 1. Precision: Aligned PBE Correlation with Libxc.
+ * 2. Stability: Added limits for small/large gradients.
+ * 3. Performance: Replaced atomicAdd with cuBLAS GEMM for Vxc and Ddot for Exc.
  */
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <cuda_runtime.h>
+#include <cublas_v2.h> // Added for GEMM/Ddot
 #include <algorithm>
 #include <Eigen/Dense>
 
@@ -20,6 +21,7 @@ using Eigen::GeneralizedSelfAdjointEigenSolver;
 using Eigen::RowMajor;
 
 #define CUDA_CHECK(call) do{ cudaError_t err=(call); if(err!=cudaSuccess){ fprintf(stderr,"CUDA Error: %s:%d\n",__FILE__,__LINE__); exit(1); } }while(0)
+#define CUBLAS_CHECK(call) do{ cublasStatus_t err=(call); if(err!=CUBLAS_STATUS_SUCCESS){ fprintf(stderr,"CUBLAS Error: %d at %s:%d\n",err,__FILE__,__LINE__); exit(1); } }while(0)
 
 __device__ inline double atomicAdd_double(double *address,double val){
 #if __CUDA_ARCH__>=600
@@ -32,11 +34,9 @@ __device__ inline double atomicAdd_double(double *address,double val){
 #endif
 }
 
-// Lower epsilon to capture core/tail contributions better
 #define RHO_EPS 1e-20
 #define MIN_GRAD 1e-28
 
-// Standard PW92/PBE Constants
 __constant__ double A_pw92 = 0.03109069086965489503; 
 __constant__ double alpha1 = 0.21370;
 __constant__ double beta1  = 7.5957;
@@ -46,7 +46,6 @@ __constant__ double beta4  = 0.49294;
 
 /* ---------- Device Functions ---------- */
 
-// PW92 Correlation (RKS) - Standard
 __device__ inline void pw92_correlation_rks(double rho, double &ec, double &vc) {
     if (rho < RHO_EPS) { ec = 0.0; vc = 0.0; return; }
     const double rs = pow(3.0 / (4.0 * M_PI * rho), 1.0/3.0);
@@ -62,7 +61,6 @@ __device__ inline void pw92_correlation_rks(double rho, double &ec, double &vc) 
     vc = ec - (rs / 3.0) * dec_drs;
 }
 
-// PBE Exchange - Libxc Aligned
 __device__ inline void pbe_exchange(double rho, double sigma, double &ex, double &vrho, double &vsigma){
     if(rho < RHO_EPS) { ex=0.0; vrho=0.0; vsigma=0.0; return; }
     
@@ -74,53 +72,31 @@ __device__ inline void pbe_exchange(double rho, double sigma, double &ex, double
     double rho43 = rho * rho13;
     double kF = pow(3.0*M_PI*M_PI*rho, 1.0/3.0);
     
-    // s = |grad rho| / (2 kF rho)
-    // s2 = sigma / (4 kF^2 rho^2)
     double s2 = 0.0;
-    // Robust s2 calculation
     if (sigma > MIN_GRAD) {
         double denom = 4.0 * kF * kF * rho * rho;
         if(denom > 1e-50) s2 = sigma / denom;
     }
-    
-    // Libxc clamping
     if(s2 > 1e12) s2 = 1e12; 
 
     double num = 1.0 + mu * s2 / kappa;
-    double den = 1.0; 
-    // F = 1 + kappa - kappa / (1 + mu s2 / kappa)
     double F = 1.0 + kappa * (1.0 - 1.0/num);
     
     ex = Cx * rho13 * F; 
-    
-    // Derivatives
-    // dF/ds2 = mu / (1 + mu s2/kappa)^2
     double dF_ds2 = mu / (num * num);
-    
-    // vsigma = d(rho ex)/dsigma
-    //        = rho * (Cx rho^1/3) * dF/ds2 * ds2/dsigma
-    // ds2/dsigma = 1 / (4 kF^2 rho^2)
     vsigma = (Cx * rho43) * dF_ds2 * (1.0 / (4.0 * kF * kF * rho * rho));
-    
-    // vrho = Ex + rho * dEx/drho
-    // dEx/drho = 4/3 Cx rho^1/3 F + Cx rho^4/3 dF/ds2 * ds2/drho
-    // ds2/drho = s2 * (-8/3) / rho
     vrho = (4.0/3.0) * ex - (8.0/3.0) * (Cx * rho43) * s2 * dF_ds2 / rho;
 }
 
-// PBE Correlation - Libxc Aligned (Critical Fixes)
 __device__ inline void pbe_correlation(double rho, double sigma, double &ec, double &vrho, double &vsigma){
     if(rho < RHO_EPS) { ec=0.0; vrho=0.0; vsigma=0.0; return; }
 
-    // 1. LDA part
     double ec_lda, vc_lda;
     pw92_correlation_rks(rho, ec_lda, vc_lda);
 
     const double beta = 0.066725;
     const double gamma = 0.03109069086965489503; 
 
-    // 2. Reduced gradient t
-    // t^2 = sigma * pi / (16 * kF * rho^2)
     double kF = pow(3.0*M_PI*M_PI*rho, 1.0/3.0);
     double t2 = 0.0;
     if(sigma > MIN_GRAD) {
@@ -129,12 +105,10 @@ __device__ inline void pbe_correlation(double rho, double sigma, double &ec, dou
     }
     if(t2 > 1.0e20) t2 = 1.0e20;
 
-    // 3. H calculation
     double x = -ec_lda / gamma;
-    // Careful expm1 for numerical stability near 0
     double expm1_x = expm1(x);
     double A = 0.0;
-    if(fabs(expm1_x) < 1e-20) A = 1.0e20; // Avoid div zero
+    if(fabs(expm1_x) < 1e-20) A = 1.0e20; 
     else A = (beta/gamma) / expm1_x;
 
     double At2 = A * t2;
@@ -147,66 +121,48 @@ __device__ inline void pbe_correlation(double rho, double sigma, double &ec, dou
     
     ec = ec_lda + H;
 
-    // 4. Derivatives for Potential
-    // dQ/d(At2)
     double Q_prime = (den - num * (1.0 + 2.0*At2)) / (den * den);
-    
     double pre_log = gamma / term_log * (beta/gamma);
     double dH_dt2 = pre_log * (Q + At2 * Q_prime);
     double dH_dA  = pre_log * t2 * t2 * Q_prime;
 
-    // vsigma
-    // dt2/dsigma = pi / (16 kF rho^2)
     double dt2_dsig = 0.0;
     double denom_sig = 16.0 * kF * rho * rho;
     if(denom_sig > 1e-50) dt2_dsig = M_PI / denom_sig;
     
     vsigma = rho * dH_dt2 * dt2_dsig;
 
-    // vrho
-    // dA/dx = -A * exp(x) / (exp(x) - 1)
     double exp_x = exp(x);
     double dA_dx = -A * exp_x / expm1_x;
-    // dx/drho = (vc_lda - ec_lda) / (rho * gamma)
-    double dx_drho = (vc_lda - ec_lda) / (rho * gamma); // Note order: vc - ec
+    double dx_drho = (vc_lda - ec_lda) / (rho * gamma); 
     double dA_drho = dA_dx * dx_drho;
-    
-    // dt2/drho = t2 * (-7/3) / rho
     double dt2_drho = t2 * (-7.0/3.0) / rho;
     
     vrho = vc_lda + H + rho * (dH_dA * dA_drho + dH_dt2 * dt2_drho);
 }
 
-/* ---------- Kernels (Planar) ---------- */
+/* ---------- Kernels ---------- */
 
 __global__ void gga_exc_vxc_kernel(int ngrid, const double *rho, const double *sigma, double *exc, double *vrho, double *vsigma){
     int g=blockIdx.x*blockDim.x+threadIdx.x;
     if(g>=ngrid) return;
-    // if(g == 1000) {
-    //     printf("DEBUG GPU [Grid 1000]: Rho = %.8e, Sigma = %.8e\n", rho[g], sigma[g]);
-    // }
     
     double r_val=rho[g];
     double s_val=sigma[g];
 
     double ex=0, vrx=0, vsx=0;
     double ec=0, vrc=0, vsc=0;
-    // if(g == 13000) {
-    //     printf("DEBUG INTEGRATOR [Grid 13000]: Rho=%.4f, Sigma=%.4e (Expect ~3.2e5)\n", r_val, s_val);
-    // }
-    // Only compute if density is significant
+
     if(r_val > RHO_EPS) {
         pbe_exchange(r_val, s_val, ex, vrx, vsx);
         pbe_correlation(r_val, s_val, ec, vrc, vsc);
     }
     
-    // exc store: total energy density per unit volume = rho * epsilon
     if(exc)    exc[g]    = r_val * (ex + ec); 
     if(vrho)   vrho[g]   = vrx + vrc;
     if(vsigma) vsigma[g] = vsx + vsc;
 }
 
-// Planar Density & Gradient
 __global__ void get_rho_sigma_kernel_planar(int nao, int rows,
                                             const double *dm, 
                                             const double *ao, 
@@ -231,19 +187,14 @@ __global__ void get_rho_sigma_kernel_planar(int nao, int rows,
         double dx_u = gphi_x[u];
         double dy_u = gphi_y[u];
         double dz_u = gphi_z[u];
-
         const double *dm_row = dm + (size_t)u * nao;
-
         for (int v = 0; v < nao; ++v) {
             double dm_val = dm_row[v];
             double phiv = phi[v];
-            
             r += dm_val * phiu * phiv;
-            
             double term_x = dx_u * phiv + phiu * gphi_x[v];
             double term_y = dy_u * phiv + phiu * gphi_y[v];
             double term_z = dz_u * phiv + phiu * gphi_z[v];
-
             gr_x += dm_val * term_x;
             gr_y += dm_val * term_y;
             gr_z += dm_val * term_z;
@@ -254,7 +205,6 @@ __global__ void get_rho_sigma_kernel_planar(int nao, int rows,
     double s = gr_x*gr_x + gr_y*gr_y + gr_z*gr_z;
     sigma[g] = s;
 
-
     if(grad_rho_out){
         grad_rho_out[g*3+0] = gr_x;
         grad_rho_out[g*3+1] = gr_y;
@@ -262,70 +212,53 @@ __global__ void get_rho_sigma_kernel_planar(int nao, int rows,
     }
 }
 
-// Planar Vxc Matrix (Symmetrized)
-__global__ void build_vxc_matrix_gga_kernel_planar(
-    int nao, int rows, int g0,
-    const double *ao_b,
-    const double *gx_b, 
-    const double *gy_b, 
-    const double *gz_b, 
-    const double *w_b,
-    const double *vrho_b,
-    const double *vsigma_b,
-    const double *grad_rho_b, 
-    double *vxc_mat)
+// NEW: Helper Kernel for GEMM-based Vxc
+// Prepares the Y matrix: Y_g,i = w_g * (0.5 * vrho * phi_i + 2.0 * vsigma * (grad_rho . grad_phi_i))
+__global__ void prepare_gga_potentials_kernel(
+    int rows, int nao,
+    const double *ao,     // [rows, nao]
+    const double *gx,     // [rows, nao]
+    const double *gy, 
+    const double *gz,
+    const double *w,      // [rows]
+    const double *vrho,   // [rows]
+    const double *vsigma, // [rows]
+    const double *grad_rho, // [rows, 3]
+    double *Y_matrix)     // Output: [rows, nao]
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if(idx >= rows * nao) return;
-    
-    int im = idx / nao; 
-    int i  = idx % nao; 
+    if (idx >= rows * nao) return;
 
-    double w = w_b[im];
-    if(fabs(w) < 1e-15) return;
+    int g = idx / nao; 
+    int i = idx % nao; 
 
-    double vr = vrho_b[im];
-    double vs = vsigma_b[im];
-    
-    double gr_x = grad_rho_b[im*3+0];
-    double gr_y = grad_rho_b[im*3+1];
-    double gr_z = grad_rho_b[im*3+2];
-
-    double aoi = ao_b[im*nao+i];
-    double dxi = gx_b[im*nao+i];
-    double dyi = gy_b[im*nao+i];
-    double dzi = gz_b[im*nao+i];
-
-    double dot_rho_phi_i = gr_x * dxi + gr_y * dyi + gr_z * dzi;
-
-    for(int j=i; j<nao; ++j){
-        double aoj = ao_b[im*nao+j];
-        double dxj = gx_b[im*nao+j];
-        double dyj = gy_b[im*nao+j];
-        double dzj = gz_b[im*nao+j];
-
-        double dot_rho_phi_j = gr_x * dxj + gr_y * dyj + gr_z * dzj;
-
-        double term_rho = vr * aoi * aoj;
-        double term_sig = 2.0 * vs * (aoi * dot_rho_phi_j + aoj * dot_rho_phi_i);
-        
-        double val = w * (term_rho + term_sig);
-
-        atomicAdd_double(vxc_mat + i*nao+j, val);
-        if (i != j) {
-            atomicAdd_double(vxc_mat + j*nao+i, val);
-        }
+    double wg = w[g];
+    if (fabs(wg) < 1e-15) {
+        Y_matrix[idx] = 0.0;
+        return;
     }
+
+    double vr = vrho[g];
+    double vs = vsigma[g];
+    double gr_x = grad_rho[g*3+0];
+    double gr_y = grad_rho[g*3+1];
+    double gr_z = grad_rho[g*3+2];
+
+    int pos = g * nao + i;
+    double phi = ao[pos];
+    double dphi_x = gx[pos];
+    double dphi_y = gy[pos];
+    double dphi_z = gz[pos];
+
+    double dot = gr_x * dphi_x + gr_y * dphi_y + gr_z * dphi_z;
+
+    // Vxc Term = A^T * Y + Y^T * A
+    // Decomposed into symmetric parts
+    double term = 0.5 * vr * phi + 2.0 * vs * dot;
+    
+    Y_matrix[idx] = wg * term;
 }
 
-// Integration Kernel
-__global__ void weighted_sum_gga_kernel(const double *w,const double *exc,double *out,int n){
-    int tid=blockIdx.x*blockDim.x+threadIdx.x;
-    if(tid>=n) return;
-    atomicAdd_double(out,w[tid]*exc[tid]);
-}
-
-// ... (build_coulomb_kernel & get_rho_kernel remain unchanged)
 __global__ void build_coulomb_kernel(int nao, int rows_m, int m0, const double *eri_slice, const double *dm, double *J) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int tot = rows_m * nao;
@@ -345,10 +278,10 @@ __global__ void build_coulomb_kernel(int nao, int rows_m, int m0, const double *
 
 extern "C" {
 
-// Vxc Matrix Host
+// OPTIMIZED: Uses cuBLAS GEMM instead of atomicAdd
 void build_vxc_matrix_gga(int nao, int ngrid, 
                           const double *ao, 
-                          const double *ao_grad, // PySCF Planar (3, N, NAO)
+                          const double *ao_grad, 
                           const double *weights,
                           const double *rho, const double *sigma, const double *grad_rho, 
                           double *vxc_mat) 
@@ -357,14 +290,21 @@ void build_vxc_matrix_gga(int nao, int ngrid,
     CUDA_CHECK(cudaMemGetInfo(&free_byte, &total_byte));
     const size_t SAFE = size_t(free_byte * 0.9); 
     const size_t aux = 64 << 20;
-    const size_t per_row = (nao * 4 + 7) * sizeof(double); 
+
+    // Memory per row calculation:
+    // AO (nao) + Grad (3*nao) + Y_temp (nao) + Scalars (7 doubles)
+    const size_t per_row = (nao * 5 + 7) * sizeof(double); 
     size_t rows_per = (SAFE > aux) ? (SAFE - aux) / per_row : 0; 
     if(rows_per == 0) exit(1); 
     if(rows_per > ngrid) rows_per = ngrid;
 
     double *d_ao=0, *d_grad=0, *d_w=0, *d_rho=0, *d_sig=0, *d_grho=0, *d_vr=0, *d_vs=0, *d_mat=0;
+    double *d_temp_Y = 0;
+
     CUDA_CHECK(cudaMalloc(&d_ao, rows_per*nao*sizeof(double))); 
     CUDA_CHECK(cudaMalloc(&d_grad, rows_per*3*nao*sizeof(double))); 
+    CUDA_CHECK(cudaMalloc(&d_temp_Y, rows_per*nao*sizeof(double))); // New buffer for Y
+
     CUDA_CHECK(cudaMalloc(&d_w, rows_per*sizeof(double))); 
     CUDA_CHECK(cudaMalloc(&d_rho, rows_per*sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_sig, rows_per*sizeof(double))); 
@@ -377,6 +317,10 @@ void build_vxc_matrix_gga(int nao, int ngrid,
     double *d_gx = d_grad;
     double *d_gy = d_grad + rows_per * nao;
     double *d_gz = d_grad + 2 * rows_per * nao;
+    
+    cublasHandle_t handle;
+    CUBLAS_CHECK(cublasCreate(&handle));
+
     const int BLOCK = 256;
     
     for(int g0=0; g0<ngrid; g0+=rows_per){
@@ -390,7 +334,6 @@ void build_vxc_matrix_gga(int nao, int ngrid,
         CUDA_CHECK(cudaMemcpyAsync(d_sig, sigma + g0, rows*sizeof(double), cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpyAsync(d_grho, grad_rho + g0*3, rows*3*sizeof(double), cudaMemcpyHostToDevice));
 
-        // Planar Gradients
         const double *src_x = ao_grad + (size_t)0 * ngrid * nao + (size_t)g0 * nao;
         const double *src_y = ao_grad + (size_t)1 * ngrid * nao + (size_t)g0 * nao;
         const double *src_z = ao_grad + (size_t)2 * ngrid * nao + (size_t)g0 * nao;
@@ -399,47 +342,98 @@ void build_vxc_matrix_gga(int nao, int ngrid,
         CUDA_CHECK(cudaMemcpyAsync(d_gy, src_y, copy_size_ao, cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpyAsync(d_gz, src_z, copy_size_ao, cudaMemcpyHostToDevice));
 
+        // 1. Compute Vrho/Vsigma
         int grid = (rows + BLOCK - 1) / BLOCK;
         gga_exc_vxc_kernel<<<grid, BLOCK>>>(rows, d_rho, d_sig, nullptr, d_vr, d_vs);
         
-        int N = rows * nao; 
-        int grid2 = (N + BLOCK - 1) / BLOCK;
-        build_vxc_matrix_gga_kernel_planar<<<grid2, BLOCK>>>(
-            nao, rows, g0, d_ao, d_gx, d_gy, d_gz, d_w, d_vr, d_vs, d_grho, d_mat
+        // 2. Prepare Y Matrix
+        int total_threads = rows * nao;
+        int grid2 = (total_threads + BLOCK - 1) / BLOCK;
+        prepare_gga_potentials_kernel<<<grid2, BLOCK>>>(
+            rows, nao, d_ao, d_gx, d_gy, d_gz, 
+            d_w, d_vr, d_vs, d_grho, d_temp_Y
         );
+
+        // 3. GEMM Accumulation: V += A^T * Y + Y^T * A
+        // cuBLAS handles ColMajor. RowMajor A(rows,nao) looks like A^T(nao,rows) to cuBLAS.
+        // We want C_row = A_row^T * Y_row.
+        // In ColMajor logic this is C_col = Y_col^T * A_col (where A_col = A_row^T).
+        // This effectively computes V_ij = sum_k Y[k,i] * A[k,j].
+        // We perform two GEMMs to sum both symmetric parts.
+
+        double alpha = 1.0;
+        double beta = 1.0; // Accumulate
+
+        // Part 1: V += Y^T * A (Symmetric part 1)
+        // d_temp_Y (A in GEMM), d_ao (B in GEMM) -> OP_N, OP_T
+        // Result is (nao x nao)
+        CUBLAS_CHECK(cublasDgemm(handle, CUBLAS_OP_N, CUBLAS_OP_T,
+                                 nao, nao, rows,
+                                 &alpha,
+                                 d_temp_Y, nao,  // "A" (ColMajor N x K) -> Logic Y^T
+                                 d_ao,     nao,  // "B" (ColMajor N x K) -> Logic A^T
+                                 &beta,
+                                 d_mat,    nao)); // C
+
+        // Part 2: V += A^T * Y (Symmetric part 2)
+        // Swap inputs
+        CUBLAS_CHECK(cublasDgemm(handle, CUBLAS_OP_N, CUBLAS_OP_T,
+                                 nao, nao, rows,
+                                 &alpha,
+                                 d_ao,     nao,
+                                 d_temp_Y, nao,
+                                 &beta,
+                                 d_mat,    nao));
     }
+
     CUDA_CHECK(cudaMemcpy(vxc_mat, d_mat, (size_t)nao*nao*sizeof(double), cudaMemcpyDeviceToHost));
     
-    CUDA_CHECK(cudaFree(d_ao)); CUDA_CHECK(cudaFree(d_grad)); CUDA_CHECK(cudaFree(d_w));
-    CUDA_CHECK(cudaFree(d_rho)); CUDA_CHECK(cudaFree(d_sig)); CUDA_CHECK(cudaFree(d_grho));
-    CUDA_CHECK(cudaFree(d_vr)); CUDA_CHECK(cudaFree(d_vs)); CUDA_CHECK(cudaFree(d_mat));
+    cublasDestroy(handle);
+    CUDA_CHECK(cudaFree(d_ao)); CUDA_CHECK(cudaFree(d_grad)); CUDA_CHECK(cudaFree(d_temp_Y));
+    CUDA_CHECK(cudaFree(d_w)); CUDA_CHECK(cudaFree(d_rho)); CUDA_CHECK(cudaFree(d_sig)); 
+    CUDA_CHECK(cudaFree(d_grho)); CUDA_CHECK(cudaFree(d_vr)); CUDA_CHECK(cudaFree(d_vs)); 
+    CUDA_CHECK(cudaFree(d_mat));
 }
 
-// Compute Energy
+// OPTIMIZED: Uses cuBLAS Ddot for Exc summation
 double compute_exc_energy_gga(int ngrid, const double *weights, const double *rho, const double *sigma) {
     size_t free_byte,total_byte; CUDA_CHECK(cudaMemGetInfo(&free_byte,&total_byte));
     const size_t SAFE=size_t(free_byte*0.9); const size_t aux=64<<20;
     const size_t per_row=4*sizeof(double); size_t rows_per=(SAFE>aux)?(SAFE-aux)/per_row:0;
     if(rows_per==0) exit(1); if(rows_per>ngrid) rows_per=ngrid;
-    double *d_w,*d_rho,*d_sig,*d_exc,*d_sum;
-    CUDA_CHECK(cudaMalloc(&d_w, rows_per*sizeof(double))); CUDA_CHECK(cudaMalloc(&d_rho, rows_per*sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_sig, rows_per*sizeof(double))); CUDA_CHECK(cudaMalloc(&d_exc, rows_per*sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_sum, sizeof(double)));
-    const int BLOCK=256; double exc_total=0.0;
+
+    double *d_w,*d_rho,*d_sig,*d_exc;
+    CUDA_CHECK(cudaMalloc(&d_w, rows_per*sizeof(double))); 
+    CUDA_CHECK(cudaMalloc(&d_rho, rows_per*sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_sig, rows_per*sizeof(double))); 
+    CUDA_CHECK(cudaMalloc(&d_exc, rows_per*sizeof(double)));
+    
+    cublasHandle_t handle;
+    CUBLAS_CHECK(cublasCreate(&handle));
+
+    const int BLOCK=256; 
+    double exc_total=0.0;
+    
     for(int g0=0;g0<ngrid;g0+=rows_per){
         int g1=std::min(g0+(int)rows_per,ngrid); int rows=g1-g0;
+        
         CUDA_CHECK(cudaMemcpyAsync(d_w, weights+g0, rows*sizeof(double),cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpyAsync(d_rho, rho+g0, rows*sizeof(double),cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpyAsync(d_sig, sigma+g0, rows*sizeof(double),cudaMemcpyHostToDevice));
+        
         int grid=(rows+BLOCK-1)/BLOCK;
         gga_exc_vxc_kernel<<<grid,BLOCK>>>(rows,d_rho,d_sig,d_exc,nullptr,nullptr);
-        CUDA_CHECK(cudaMemset(d_sum,0,sizeof(double)));
-        weighted_sum_gga_kernel<<<grid,BLOCK>>>(d_w,d_exc,d_sum,rows);
-        double partial=0.0; CUDA_CHECK(cudaMemcpy(&partial,d_sum,sizeof(double),cudaMemcpyDeviceToHost));
-        exc_total+=partial;
+        
+        double partial = 0.0;
+        // Dot product: sum(w[i] * exc[i])
+        CUBLAS_CHECK(cublasDdot(handle, rows, d_w, 1, d_exc, 1, &partial));
+        exc_total += partial;
     }
+    
+    cublasDestroy(handle);
     CUDA_CHECK(cudaFree(d_w)); CUDA_CHECK(cudaFree(d_rho)); CUDA_CHECK(cudaFree(d_sig));
-    CUDA_CHECK(cudaFree(d_exc)); CUDA_CHECK(cudaFree(d_sum)); return exc_total;
+    CUDA_CHECK(cudaFree(d_exc)); 
+    return exc_total;
 }
 
 // Get Rho/Sigma (Planar Host)
@@ -471,7 +465,6 @@ void get_rho_sigma(int nao, int ngrid, const double *dm, const double *ao, const
         size_t copy_size = rows * nao * sizeof(double);
 
         CUDA_CHECK(cudaMemcpyAsync(d_ao, ao + g0 * nao, copy_size, cudaMemcpyHostToDevice));
-        // Planar Gradients
         const double *src_x = ao_grad + (size_t)0 * ngrid * nao + (size_t)g0 * nao;
         const double *src_y = ao_grad + (size_t)1 * ngrid * nao + (size_t)g0 * nao;
         const double *src_z = ao_grad + (size_t)2 * ngrid * nao + (size_t)g0 * nao;
@@ -490,7 +483,6 @@ void get_rho_sigma(int nao, int ngrid, const double *dm, const double *ao, const
     CUDA_CHECK(cudaFree(d_rho)); CUDA_CHECK(cudaFree(d_sig)); CUDA_CHECK(cudaFree(d_grho));
 }
 
-// ... (build_coulomb_matrix and get_rho remain unchanged) ...
 void build_coulomb_matrix(int nao, const double *eri, const double *dm, double *J) {
     size_t free,total; CUDA_CHECK(cudaMemGetInfo(&free,&total));
     size_t rows_per = (free*0.9 - nao*nao*sizeof(double)*2)/(nao*nao*nao*sizeof(double));
@@ -510,7 +502,6 @@ void build_coulomb_matrix(int nao, const double *eri, const double *dm, double *
     CUDA_CHECK(cudaFree(d_dm)); CUDA_CHECK(cudaFree(d_J)); CUDA_CHECK(cudaFree(d_eri));
 }
 
-
 } // extern "C"
 
 extern "C" void solve_fock_eigen(int n, const double *F_in, const double *S_in, double *e, double *C) {
@@ -521,6 +512,6 @@ extern "C" void solve_fock_eigen(int n, const double *F_in, const double *S_in, 
     GeneralizedSelfAdjointEigenSolver<Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, RowMajor>> solver(F, S, Eigen::ComputeEigenvectors);
     VectorXd evalues = solver.eigenvalues();
     auto evecs = solver.eigenvectors();
-    std::memcpy(e, evalues.data(), n*sizeof(double));
+    std::memcpy(e, evalues.data(),  n*sizeof(double));
     std::memcpy(C, evecs.data(),  n*n*sizeof(double));
 }

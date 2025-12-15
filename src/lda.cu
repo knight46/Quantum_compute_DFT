@@ -5,6 +5,7 @@
 #include <Eigen/Dense>
 #include <algorithm>
 #include <cuda_runtime.h>
+#include <cublas_v2.h>
 
 using Eigen::MatrixXd;
 using Eigen::VectorXd;
@@ -12,16 +13,25 @@ using Eigen::GeneralizedSelfAdjointEigenSolver;
 using Eigen::RowMajor;
 
 /* ---------- error check macro ---------- */
-#define CUDA_CHECK(call)                                             \
-do {                                                                 \
-    cudaError_t err = (call);                                        \
-    if (err != cudaSuccess) {                                        \
-        std::cerr << "CUDA error at " << __FILE__ << ":" << __LINE__ \
+#define CUDA_CHECK(call)                                                     \
+do {                                                                         \
+    cudaError_t err = (call);                                                \
+    if (err != cudaSuccess) {                                                \
+        std::cerr << "CUDA error at " << __FILE__ << ":" << __LINE__         \
                   << " code=" << err << " '" << cudaGetErrorString(err) << "'" << std::endl; \
-        std::exit(EXIT_FAILURE);                                     \
-    }                                                                \
+        std::exit(EXIT_FAILURE);                                             \
+    }                                                                        \
 } while(0)
 
+#define CUBLAS_CHECK(call)                                                   \
+do {                                                                         \
+    cublasStatus_t err = (call);                                             \
+    if (err != CUBLAS_STATUS_SUCCESS) {                                      \
+        std::cerr << "cuBLAS error at " << __FILE__ << ":" << __LINE__       \
+                  << " code=" << err << std::endl;                           \
+        std::exit(EXIT_FAILURE);                                             \
+    }                                                                        \
+} while(0)
 
 struct VWNPar {
     double A, b, c, x0;
@@ -37,10 +47,8 @@ __constant__ VWNPar vwn_param[2];
 /* ---------- device double atomicAdd fallback ---------- */
 __device__ inline double atomicAdd_double(double *address, double val) {
 #if __CUDA_ARCH__ >= 600
-    // On modern architectures, use hardware atomicAdd for double
     return atomicAdd(address, val);
 #else
-    // Fallback implementation using atomicCAS on 64-bit integer representation
     unsigned long long int* address_as_ull = (unsigned long long int*)address;
     unsigned long long int old = *address_as_ull, assumed;
     double old_val;
@@ -103,43 +111,21 @@ __global__ void lda_exc_vxc_kernel(int ngrid, const double *rho, double *exc, do
     if (vxc) vxc[g] = vx + vc;
 }
 
-/* ---------- 2. build_vxc_matrix on GPU ---------- */
-/*
-  Kernel computes each matrix element (i,j) by summing over grids:
-    vxc_mat[i,j] = sum_g weights[g] * vxc[g] * ao[g*nao + i] * ao[g*nao + j]
-*/
-__global__ void build_vxc_matrix_kernel(int nao, int rows,
-                                        int g0,
-                                        const double *ao_b,   // (rows, nao)
-                                        const double *w_b,    // (rows)
-                                        const double *vxc_b,  // (rows)
-                                        double *vxc_mat)     
+/* Helper kernel to combine weights and vxc for cuBLAS */
+__global__ void scale_ao_rows_kernel(int rows, int nao, 
+                                     const double *ao, 
+                                     const double *w, 
+                                     const double *vxc, 
+                                     double *ao_scaled)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= rows * nao) return;
-    int im = idx / nao;        // 0..rows-1
-    int i  = idx % nao;
-    int g  = g0 + im;         
+    int tot = rows * nao;
+    if (idx >= tot) return;
 
-    double aoi = ao_b[im * nao + i];
-    double w   = w_b[im];
-    double vxc = vxc_b[im];
-
-    for (int j = 0; j < nao; ++j) {
-        double aoj = ao_b[im * nao + j];
-        double contrib = w * vxc * aoi * aoj;
-        atomicAdd_double(&vxc_mat[i * nao + j], contrib);
-    }
-}
-
-
-/* ---------- 3. compute_exc_energy on GPU (uses lda kernel then reduction) ---------- */
-__global__ void weighted_sum_kernel(const double *weights, const double *values, double *out, int n)
-{
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= n) return;
-    double tmp = weights[tid] * values[tid];
-    atomicAdd_double(out, tmp);
+    int im = idx / nao; // Row index (grid point index relative to batch)
+    
+    double scale = w[im] * vxc[im];
+    ao_scaled[idx] = ao[idx] * scale;
 }
 
 /* ---------- 4. get_rho on GPU ---------- */
@@ -194,7 +180,7 @@ static void copy_vwn_params_to_device()
     CUDA_CHECK(cudaMemcpyToSymbol(vwn_param, vwn_param_host, sizeof(VWNPar)*2));
 }
 
-/* build_vxc_matrix: GPU version */
+/* build_vxc_matrix: cuBLAS version */
 void build_vxc_matrix(int nao, int ngrid,
                       const double *ao,    
                       const double *weights,
@@ -205,8 +191,16 @@ void build_vxc_matrix(int nao, int ngrid,
     CUDA_CHECK(cudaMemGetInfo(&free_byte, &total_byte));
     const size_t SAFE_FREE = free_byte * 0.9;        
 
+    // Buffers needed:
+    // 1. AO block (Original): rows * nao
+    // 2. AO scaled (Modified): rows * nao
+    // 3. Weights: rows
+    // 4. Rho: rows
+    // 5. Vxc: rows
+    // (Scale vector buffer is removed as we fuse it into the scaling kernel)
+    
     const size_t aux_buf   = 64 * 1024 * 1024;       
-    const size_t per_row   = (nao + 3) * sizeof(double); 
+    const size_t per_row   = (2 * nao + 3) * sizeof(double); 
     const size_t left_byte = (SAFE_FREE > aux_buf) ? (SAFE_FREE - aux_buf) : 0;
     if (left_byte == 0) {
         std::cerr << "Not enough GPU memory to tile build_vxc_matrix!" << std::endl;
@@ -216,21 +210,32 @@ void build_vxc_matrix(int nao, int ngrid,
     if (block_rows < 1) block_rows = 1;
     if (block_rows > ngrid) block_rows = ngrid;
 
-    double *d_ao_b   = nullptr;   
-    double *d_w_b    = nullptr;   
-    double *d_rho_b  = nullptr;   
-    double *d_vxc_b  = nullptr;   
+    double *d_ao_b    = nullptr;   
+    double *d_ao_scaled = nullptr;
+    double *d_w_b     = nullptr;   
+    double *d_rho_b   = nullptr;   
+    double *d_vxc_b   = nullptr;   
     double *d_vxc_mat = nullptr;  
-    CUDA_CHECK(cudaMalloc(&d_ao_b,    block_rows * nao * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_w_b,     block_rows * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_rho_b,   block_rows * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_vxc_b,   block_rows * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_vxc_mat, (size_t)nao * nao * sizeof(double)));
+
+    CUDA_CHECK(cudaMalloc(&d_ao_b,      block_rows * nao * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_ao_scaled, block_rows * nao * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_w_b,       block_rows * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_rho_b,     block_rows * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_vxc_b,     block_rows * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_vxc_mat,   (size_t)nao * nao * sizeof(double)));
+    
+    // Initialize output matrix to zero on device
     CUDA_CHECK(cudaMemset(d_vxc_mat, 0, (size_t)nao * nao * sizeof(double)));
 
     copy_vwn_params_to_device();
 
+    cublasHandle_t handle;
+    CUBLAS_CHECK(cublasCreate(&handle));
+
     const int BLOCK = 256;
+    double alpha = 1.0;
+    double beta  = 1.0; // Accumulate
+
     for (int g0 = 0; g0 < ngrid; g0 += block_rows) {
         int g1 = std::min(g0 + (int)block_rows, ngrid);
         int rows = g1 - g0;
@@ -242,29 +247,64 @@ void build_vxc_matrix(int nao, int ngrid,
         CUDA_CHECK(cudaMemcpyAsync(d_rho_b,  rho     + g0,
                                    rows * sizeof(double), cudaMemcpyHostToDevice));
 
+        // 1. Calculate vxc on grid
         int grid_g = (rows + BLOCK - 1) / BLOCK;
         lda_exc_vxc_kernel<<<grid_g, BLOCK>>>(rows, d_rho_b, nullptr, d_vxc_b, 0.0);
         CUDA_CHECK(cudaGetLastError());
 
-        int N = rows * nao;
-        int grid = (N + BLOCK - 1) / BLOCK;
-        build_vxc_matrix_kernel<<<grid, BLOCK>>>(
-                nao, rows, g0, d_ao_b, d_w_b, d_vxc_b, d_vxc_mat);
+        // 2. Prepare scaled AO matrix: AO_scaled[i] = AO[i] * w[i] * vxc[i]
+        // Flattened total elements = rows * nao
+        int total_elements = rows * nao;
+        int grid_scale = (total_elements + BLOCK - 1) / BLOCK;
+        
+        scale_ao_rows_kernel<<<grid_scale, BLOCK>>>(rows, nao, d_ao_b, d_w_b, d_vxc_b, d_ao_scaled);
         CUDA_CHECK(cudaGetLastError());
-        CUDA_CHECK(cudaDeviceSynchronize());
+
+        // 3. Compute Vxc contribution using GEMM
+        // Formula: V_mat = sum_g ( w * vxc * phi_i * phi_j )
+        // Matrix form: V_mat = A^T * (diag(w*vxc) * A)
+        // Let A = d_ao_b (rows x nao) in logical Row-Major.
+        // Let B = d_ao_scaled = diag(w*vxc) * A (rows x nao).
+        // V_mat = A^T * B.
+        //
+        // cuBLAS (Col-Major) View:
+        // A is stored as (nao x rows). 
+        // B is stored as (nao x rows).
+        // We want C (nao x nao).
+        // C = A * B^T (in cuBLAS view)
+        //   A (nao x rows) * B^T (rows x nao) -> (nao x nao).
+        // Wait, standard GEMM in Col-Major for C = A * B^T is:
+        // C = Op(A) * Op(B).
+        // Here, we want Logical: C_ij = sum_k A_ki * B_kj. -> C = A^T * B.
+        // In Col-Major storage, Logical A^T is represented by just A (because A_logical_row = A_cublas_col).
+        // Let's re-verify:
+        // C_cublas[i + j*ldc] = sum_k A[i + k*lda] * B[j + k*ldb] (if NT)
+        // This corresponds to C = A * B^T.
+        // A is (nao x rows). B is (nao x rows). 
+        // Result is (nao x nao). Correct.
+        
+        CUBLAS_CHECK(cublasDgemm(handle, CUBLAS_OP_N, CUBLAS_OP_T,
+                                 nao, nao, rows,
+                                 &alpha,
+                                 d_ao_b, nao,       // A
+                                 d_ao_scaled, nao,  // B
+                                 &beta,
+                                 d_vxc_mat, nao));  // C
     }
 
     CUDA_CHECK(cudaMemcpy(vxc_mat, d_vxc_mat, (size_t)nao * nao * sizeof(double),
                           cudaMemcpyDeviceToHost));
 
+    CUBLAS_CHECK(cublasDestroy(handle));
     CUDA_CHECK(cudaFree(d_ao_b));
+    CUDA_CHECK(cudaFree(d_ao_scaled));
     CUDA_CHECK(cudaFree(d_w_b));
     CUDA_CHECK(cudaFree(d_rho_b));
     CUDA_CHECK(cudaFree(d_vxc_b));
     CUDA_CHECK(cudaFree(d_vxc_mat));
 }
 
-/* compute_exc_energy: GPU accelerated */
+/* compute_exc_energy: cuBLAS accelerated */
 double compute_exc_energy(int ngrid,
                           const double *weights,
                           const double *rho)
@@ -284,23 +324,22 @@ double compute_exc_energy(int ngrid,
     if (block_rows < 1) block_rows = 1;
     if (block_rows > ngrid) block_rows = ngrid;
 
-    // std::cout << "[compute_exc_energy_tiled]  ngrid=" << ngrid
-    //           << "  free=" << free_byte/1024/1024 << " MB"
-    //           << "  block_rows=" << block_rows << std::endl;
-
     double *d_rho_b   = nullptr;
     double *d_w_b     = nullptr;
     double *d_exc_b   = nullptr;
-    double *d_sum_b   = nullptr;
+    
     CUDA_CHECK(cudaMalloc(&d_rho_b,   block_rows * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_w_b,     block_rows * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_exc_b,   block_rows * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_sum_b,   sizeof(double)));
 
     copy_vwn_params_to_device();
+    
+    cublasHandle_t handle;
+    CUBLAS_CHECK(cublasCreate(&handle));
 
     const int BLOCK = 256;
     double exc_total = 0.0;
+    
     for (int g0 = 0; g0 < ngrid; g0 += block_rows) {
         int g1 = std::min(g0 + (int)block_rows, ngrid);
         int rows = g1 - g0;
@@ -314,20 +353,16 @@ double compute_exc_energy(int ngrid,
         lda_exc_vxc_kernel<<<grid, BLOCK>>>(rows, d_rho_b, d_exc_b, nullptr, 0.0);
         CUDA_CHECK(cudaGetLastError());
 
-        CUDA_CHECK(cudaMemset(d_sum_b, 0, sizeof(double)));
-        weighted_sum_kernel<<<grid, BLOCK>>>(d_w_b, d_exc_b, d_sum_b, rows);
-        CUDA_CHECK(cudaGetLastError());
-
-        double partial = 0.0;
-        CUDA_CHECK(cudaMemcpy(&partial, d_sum_b, sizeof(double), cudaMemcpyDeviceToHost));
-        exc_total += partial;
-        CUDA_CHECK(cudaDeviceSynchronize());
+        // Use cuBLAS dot product for weighted sum
+        double dot_res = 0.0;
+        CUBLAS_CHECK(cublasDdot(handle, rows, d_w_b, 1, d_exc_b, 1, &dot_res));
+        exc_total += dot_res;
     }
 
+    CUBLAS_CHECK(cublasDestroy(handle));
     CUDA_CHECK(cudaFree(d_rho_b));
     CUDA_CHECK(cudaFree(d_w_b));
     CUDA_CHECK(cudaFree(d_exc_b));
-    CUDA_CHECK(cudaFree(d_sum_b));
 
     return exc_total;
 }
@@ -414,14 +449,6 @@ void solve_fock_eigen(int n,
     std::memcpy(e, evalues.data(), n*sizeof(double));
     std::memcpy(C, evecs.data(),  n*n*sizeof(double));
 }
-
-// void GPU_compute(int nao, int ngrid,
-//              const double *dm,
-//              const double *ao,
-//              double *rho_out)
-// {
-    
-// }
 
 /* get_rho: GPU-accelerated version */
 void get_rho(int nao, int ngrid,

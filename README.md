@@ -5,6 +5,11 @@
 ### Target Architecture 1 (e.g., RTX 4060) - Compute Capability 8.6
 `nvcc -shared -o ./weights/lda.so ./src/lda.cu -Xcompiler -fPIC -I/usr/include/eigen3 -gencode arch=compute_86,code=sm_86 -gencode arch=compute_86,code=compute_86`
 
+ - Use cuBLAs version:
+
+`nvcc -O3 --use_fast_math -shared -o ./weights/lda.so ./src/lda.cu -Xcompiler -fPIC -I/usr/include/eigen3 -gencode arch=compute_86,code=sm_86 -gencode arch=compute_86,code=compute_86 -lcublas`
+
+
 ### Target Architecture 2 (e.g., MX250) - Compute Capability 5.0
 `nvcc -shared -o ./weights/mxlda.so ./src.lda.cu -Xcompiler -fPIC -I/usr/include/eigen3 -gencode arch=compute_50,code=sm_50 -gencode arch=compute_50,code=compute_50`
 
@@ -31,6 +36,10 @@ Execute the script:
 
 ### Target Architecture 1 (e.g., RTX 4060) - Compute Capability 8.6
 `nvcc -shared -o ./weights/gga.so ./src/gga.cu -Xcompiler -fPIC -I/usr/include/eigen3 -gencode arch=compute_86,code=sm_86 -gencode arch=compute_86,code=compute_86`
+
+ - Use cuBLAs version:
+
+`nvcc -O3 --use_fast_math -shared -o ./weights/gga.so ./src/gga.cu -Xcompiler -fPIC -I/usr/include/eigen3 -gencode arch=compute_86,code=sm_86 -gencode arch=compute_86,code=compute_86 -lcublas`
 
 ### Target Architecture 2 (e.g., MX250) - Compute Capability 5.0
 `nvcc -shared -o ./weights/mxgga.so ./src/gga.cu -Xcompiler -fPIC -I/usr/include/eigen3 -gencode arch=compute_50,code=sm_50 -gencode arch=compute_50,code=compute_50`
