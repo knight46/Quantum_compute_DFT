@@ -3,6 +3,7 @@ import cupy as cp
 from scipy.linalg import eigh
 import sys, ctypes, os, time
 from pyscf import gto, dft
+from pyscf.scf import diis
 from grid import build, get_ao_grad
 import argparse
 
@@ -17,11 +18,6 @@ lib.build_vxc_gpu.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctype
 lib.compute_exc_gpu.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
 lib.compute_exc_gpu.restype = ctypes.c_double
 lib.build_coulomb_gpu.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
-
-def adaptive_mixing(dm_new, dm_old, cycle, dm_change):
-    if cycle < 5: return 0.5 * dm_new + 0.5 * dm_old
-    if dm_change > 1e-2: return 0.3 * dm_new + 0.7 * dm_old
-    return 0.5 * dm_new + 0.5 * dm_old
 
 def load_xyz_as_pyscf_atom(xyz_path):
     with open(xyz_path, "r") as f: lines = f.readlines()
@@ -51,15 +47,12 @@ if __name__ == "__main__":
     print("Moving data to GPU...")
     t_start_gpu = time.time()
     
-
     d_ao      = cp.asarray(ao_values, dtype=np.float64, order='C')
     d_ao_grad = cp.asarray(ao_grad,   dtype=np.float64, order='C')
     d_weights = cp.asarray(grids.weights, dtype=np.float64, order='C')
     
-
     d_eri = cp.asarray(eri.reshape(nao*nao, nao*nao), dtype=np.float64, order='C')
     
-
     d_dm       = cp.zeros((nao, nao), dtype=np.float64, order='C')
     d_J        = cp.zeros((nao, nao), dtype=np.float64, order='C')
     d_vxc      = cp.zeros((nao, nao), dtype=np.float64, order='C')
@@ -67,7 +60,6 @@ if __name__ == "__main__":
     d_sigma    = cp.zeros(ngrid, dtype=np.float64)
     d_grad_rho = cp.zeros((ngrid, 3), dtype=np.float64)
     
-
     d_B_work   = cp.zeros((ngrid, nao), dtype=np.float64, order='C')
     d_exc_work = cp.zeros(ngrid, dtype=np.float64)
 
@@ -77,6 +69,8 @@ if __name__ == "__main__":
     e, C = eigh(Hcore, S)
     dm = 2 * C[:, :nocc] @ C[:, :nocc].T
     
+    adiis = diis.CDIIS()
+
     print("\nSCF started!")
     print("-" * 65)
     print(f"{'epoch':>4} {'tot energy':>15} {'Δenergy':>12} {'Δdensity':>12}")
@@ -109,10 +103,8 @@ if __name__ == "__main__":
 
         lib.build_coulomb_gpu(nao, p_eri, p_dm, p_J)
 
-
         lib.get_rho_sigma_gpu(nao, ngrid, p_dm, p_ao, p_ao_grad, p_rho, p_sigma, p_grho)
         
-
         cp.cuda.Stream.null.synchronize()
         t_vxc_start = time.time()
         
@@ -122,7 +114,6 @@ if __name__ == "__main__":
         t_vxc_end = time.time()
         vxc_times.append(t_vxc_end - t_vxc_start)
         
-
         t_exc_start = time.time()
         
         E_xc = lib.compute_exc_gpu(ngrid, nao, p_weights, p_rho, p_sigma, p_exc_w)
@@ -135,6 +126,9 @@ if __name__ == "__main__":
         
         Vxc_cpu = 0.5 * (Vxc_raw + Vxc_raw.T)
         F = Hcore + J_cpu + Vxc_cpu
+
+        F = adiis.update(S, dm, F)
+
         e, C = eigh(F, S)
         
         dm_new = 2 * C[:, :nocc] @ C[:, :nocc].T
@@ -152,7 +146,6 @@ if __name__ == "__main__":
             converged = True
             end_time = time.time()
             
-
             avg_vxc = sum(vxc_times) / len(vxc_times) * 1000 
             avg_exc = sum(exc_times) / len(exc_times) * 1000 
             
@@ -168,12 +161,11 @@ if __name__ == "__main__":
             print("")
             break
 
-        dm = adaptive_mixing(dm_new, dm, cycle, dm_change)
+        dm = dm_new
         E_old = E_tot
 
     if not converged:
         print("SCF Unconverged.")
-
 
     mol = gto.Mole()
     mol.atom = atom_structure
