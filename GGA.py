@@ -98,7 +98,7 @@ if __name__ == "__main__":
     vxc_times = []
     exc_times = []
 
-    for cycle in range(100):
+    for cycle in range(200):
         d_dm.set(dm)
 
         lib.build_coulomb_gpu(nao, p_eri, p_dm, p_J)
@@ -177,14 +177,16 @@ if __name__ == "__main__":
     mf.xc = 'PBE'
     mf.kernel()
     dm_ref = mf.make_rdm1()
+    elapsed = time.time() - start
 
+    Etot  = mf.energy_tot()
     h1 = mol.intor('int1e_kin') + mol.intor('int1e_nuc')
     E1 = np.einsum('ij,ji->', h1, dm_ref)
     vh = mf.get_j(mol, dm_ref)
     Ecoul = 0.5 * np.einsum('ij,ji->', vh, dm_ref)
     Exc   = mf.energy_elec()[0] - (E1 + Ecoul)
-    Etot  = mf.energy_tot()
-    elapsed = time.time() - start
+    
+    
 
     print('PySCF (PBE) reference:')
     print(f' E_one  : {E1:.6f} Hartree')
