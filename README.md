@@ -1,51 +1,94 @@
-# LDA(Local Density Approximation)
-
-## Compile CUDA Source Files
-
-### Target Architecture 1 (e.g., RTX 4060) - Compute Capability 8.6
-`nvcc -shared -o ./weights/lda.so ./src/lda.cu -Xcompiler -fPIC -I/usr/include/eigen3 -gencode arch=compute_86,code=sm_86 -gencode arch=compute_86,code=compute_86`
-
-### Target Architecture 2 (e.g., MX250) - Compute Capability 5.0
-`nvcc -shared -o ./weights/mxlda.so ./src.lda.cu -Xcompiler -fPIC -I/usr/include/eigen3 -gencode arch=compute_50,code=sm_50 -gencode arch=compute_50,code=compute_50`
 
 
-## Compile C++ Source Files
-`g++ -shared -o ./weigths/liblda.so ./src/lda.cpp -I/usr/include/eigen3 -gencode arch=compute_86,code=sm_86 -gencode arch=compute_86,code=compute_86`
+# DFT Functionals with Gaussian Basis Sets
 
-## Run Python Script 
+This repository provides CUDA- and CPU-based implementations of Density Functional Theory (DFT) exchange–correlation functionals using **Gaussian basis sets**, including **LDA** and **GGA**.
+The CUDA implementations are designed for **GPU acceleration**, while CPU fallbacks are also provided for verification and comparison.
 
-Before running the script, update the library path in LDA.py:
+---
 
- - For Architecture 1: Change the `libname` (LDA.py:Linux) variable to `lda.so`.
+## LDA (Local Density Approximation)
 
- - For Architecture 2: Change the `libname` (LDA.py:Linux) variable to `mxlda.so`.
+### Compile CUDA Source Files
 
-Execute the script:
+> **Note:**
+> GPU architectures differ across NVIDIA devices. Although precompiled shared libraries (`.so`) are provided in the `weights/` directory, **it is strongly recommended to recompile the CUDA source code for your specific GPU architecture** to ensure correctness and optimal performance.
 
-`python LDA.py H2O`
+Typical compute capability mappings:
+
+* **RTX 4060, RTX A6000** → `sm_86`
+* **RTX A100** → `sm_80`
+* **MX250** → `sm_50`
+
+---
+
+### CUDA (GPU) Version
+
+Example: compiling for **sm_86**
+
+```bash
+nvcc -O3 --use_fast_math -shared -o ./weights/lda.so ./src/lda.cu -Xcompiler -fPIC -I./eigen_lib -gencode arch=compute_86,code=sm_86 -gencode arch=compute_86,code=compute_86 -lcublas -lcusolver
+```
+
+---
+
+### C++ (CPU) Version
+
+```bash
+g++ -shared -o ./weigths/liblda.so ./src/lda.cpp -I/usr/include/eigen3 -gencode arch=compute_86,code=sm_86 -gencode arch=compute_86,code=compute_86
+```
+
+> **Note**
+> The CPU version is intended for validation and benchmarking against the CUDA implementation.
+
+---
+
+### Run the Python Script
+
+Execute the Python driver script after successful compilation.
+
+Example: **water molecule (H₂O)**
+
+```bash
+python LDA.py H2O
+```
+
+---
+
+## GGA (Generalized Gradient Approximation)
+
+### Compile CUDA Source Files
+
+Example: compiling for **sm_86**
+
+```bash
+nvcc -O3 --use_fast_math -shared -o ./weights/gga.so ./src/gga.cu -Xcompiler -fPIC -I./eigen_lib -gencode arch=compute_86,code=sm_86 -gencode arch=compute_86,code=compute_86 -lcublas
+```
+
+---
+
+### Run the Python Script
+
+Example: **benzene molecule**
+
+```bash
+python GGA.py Benzene
+```
+
+---
+
+## Molecular Data and Grid Files
+
+The repository includes predefined:
+
+* Molecular coordinate files
+* Auxiliary data required for DFT evaluations
+
+You may:
+
+* Select existing molecular configurations, or
+* Append your own molecular geometries definitions following the existing format.
 
 
-# GGA(Generalized Gradient Approximation)
-
-## Compile CUDA Source Files
-
-### Target Architecture 1 (e.g., RTX 4060) - Compute Capability 8.6
-`nvcc -shared -o ./weights/gga.so ./src/gga.cu -Xcompiler -fPIC -I/usr/include/eigen3 -gencode arch=compute_86,code=sm_86 -gencode arch=compute_86,code=compute_86`
-
-### Target Architecture 2 (e.g., MX250) - Compute Capability 5.0
-`nvcc -shared -o ./weights/mxgga.so ./src/gga.cu -Xcompiler -fPIC -I/usr/include/eigen3 -gencode arch=compute_50,code=sm_50 -gencode arch=compute_50,code=compute_50`
-
-## Run Python Script
-
-Before running the script, update the library path in LDA.py:
-
- - For Architecture 1: Change the `libname` (GGA.py:Linux) variable to `gga.so`.
-
- - For Architecture 2: Change the `libname` (GGA.py:Linux) variable to `mxgga.so`.
-
-Execute the script:
-
-`python GGA.py Benzene`
 
 
-**Note:** The files contain various molecular coordinate data and grid information. You may select existing configurations or append custom data as needed
