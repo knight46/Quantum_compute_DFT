@@ -1,4 +1,3 @@
-
 import numpy as np
 from pyscf import gto, scf, dft
 from scipy.linalg import eigh
