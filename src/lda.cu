@@ -1,70 +1,39 @@
 #include <cmath>
-#include <cstring>
+#include <cstdio>
 #include <cstdlib>
-#include <iostream>
-#include <Eigen/Dense>
-#include <algorithm>
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
+#include <algorithm>
 
-using Eigen::MatrixXd;
-using Eigen::VectorXd;
-using Eigen::GeneralizedSelfAdjointEigenSolver;
-using Eigen::RowMajor;
+#define CUDA_CHECK(call) do{ cudaError_t err=(call); if(err!=cudaSuccess){ fprintf(stderr,"CUDA Error: %s:%d\n",__FILE__,__LINE__); } }while(0)
+#define CUBLAS_CHECK(call) do{ cublasStatus_t err=(call); if(err!=CUBLAS_STATUS_SUCCESS){ fprintf(stderr,"CUBLAS Error at line %d\n",__LINE__); } }while(0)
 
-/* ---------- error check macro ---------- */
-#define CUDA_CHECK(call)                                                     \
-do {                                                                         \
-    cudaError_t err = (call);                                                \
-    if (err != cudaSuccess) {                                                \
-        std::cerr << "CUDA error at " << __FILE__ << ":" << __LINE__         \
-                  << " code=" << err << " '" << cudaGetErrorString(err) << "'" << std::endl; \
-        std::exit(EXIT_FAILURE);                                             \
-    }                                                                        \
-} while(0)
+#define RHO_EPS 1e-20
 
-#define CUBLAS_CHECK(call)                                                   \
-do {                                                                         \
-    cublasStatus_t err = (call);                                             \
-    if (err != CUBLAS_STATUS_SUCCESS) {                                      \
-        std::cerr << "cuBLAS error at " << __FILE__ << ":" << __LINE__       \
-                  << " code=" << err << std::endl;                           \
-        std::exit(EXIT_FAILURE);                                             \
-    }                                                                        \
-} while(0)
 
 struct VWNPar {
     double A, b, c, x0;
 };
-static const VWNPar vwn_param_host[2] = {
-    {0.0310907,  3.72744, 12.9352, -0.10498},   // ζ=0
-    {0.01554535, 7.06042, 18.0578, -0.32500}    // ζ=1
-};
 
-/* For device use, copy parameters to constant memory */
 __constant__ VWNPar vwn_param[2];
 
-/* ---------- device double atomicAdd fallback ---------- */
-__device__ inline double atomicAdd_double(double *address, double val) {
-#if __CUDA_ARCH__ >= 600
-    return atomicAdd(address, val);
-#else
-    unsigned long long int* address_as_ull = (unsigned long long int*)address;
-    unsigned long long int old = *address_as_ull, assumed;
-    double old_val;
-    do {
-        assumed = old;
-        old_val = __longlong_as_double(assumed);
-        unsigned long long int new_val_ull = __double_as_longlong(old_val + val);
-        old = atomicCAS(address_as_ull, assumed, new_val_ull);
-    } while (assumed != old);
-    return __longlong_as_double(old);
-#endif
+
+const VWNPar vwn_param_host[2] = {
+    {0.0310907,  3.72744, 12.9352, -0.10498},  
+    {0.01554535, 7.06042, 18.0578, -0.32500}   
+};
+
+__device__ inline void slater_exchange(double rho, double &ex, double &vx) {
+    if (rho < RHO_EPS) { ex = 0.0; vx = 0.0; return; }
+
+    const double Cx = 0.7385587663820224;
+    double rho13 = pow(rho, 1.0/3.0);
+
+    ex = -Cx * rho13;
+    vx = (4.0/3.0) * ex;
 }
 
-/* ---------- 1b. device math helpers ---------- */
-__device__ inline void vwn_ec_device(double x, const VWNPar &p, double &ec, double &dec_dx)
-{
+__device__ inline void vwn_ec_sub(double x, const VWNPar &p, double &ec, double &dec_dx) {
     const double X = x * x + p.b * x + p.c;
     const double Q = sqrt(4.0 * p.c - p.b * p.b);
     const double log_term  = log(x * x / X);
@@ -74,442 +43,194 @@ __device__ inline void vwn_ec_device(double x, const VWNPar &p, double &ec, doub
     const double corr  = p.b * p.x0 / denom *
         (log((x - p.x0) * (x - p.x0) / X) +
          2.0 * (2.0 * p.x0 + p.b) / Q * atan(Q / (2.0 * x + p.b)));
+    
     ec = p.A * (log_term + atan_term - corr);
+    
     dec_dx = p.A * (2.0 / x - (2.0 * x + p.b) / X -
                     p.b * p.x0 / denom * (2.0 / (x - p.x0) - (2.0 * x + p.b) / X));
 }
 
-/* ---------- 1c. LDA kernel: compute exc and vxc per grid point ---------- */
-__global__ void lda_exc_vxc_kernel(int ngrid, const double *rho, double *exc, double *vxc, double zeta)
-{
+__device__ inline void vwn_correlation(double rho, double &ec, double &vc) {
+    if (rho < RHO_EPS) { ec = 0.0; vc = 0.0; return; }
+    
     const double pi = 3.14159265358979323846;
-    const double Cx = 0.7385587663820224;
-    int g = blockIdx.x * blockDim.x + threadIdx.x;
-    if (g >= ngrid) return;
-
-    double r = rho[g];
-    if (r < 1e-300) r = 1e-300;
-    double rs = pow(3.0 / (4.0 * pi * r), 1.0 / 3.0);
+    double rs = pow(3.0 / (4.0 * pi * rho), 1.0 / 3.0);
     double x  = sqrt(rs);
 
-    // correlation
-    double ec0 = 0.0, dec0_dx = 0.0, ec1 = 0.0, dec1_dx = 0.0;
-    vwn_ec_device(x, vwn_param[0], ec0, dec0_dx);
-    vwn_ec_device(x, vwn_param[1], ec1, dec1_dx);
+    double ec0, dec0_dx;
 
-    double z2 = zeta * zeta;
-    double ec     = ec0 + (ec1 - ec0) * z2;
-    double dec_dx = dec0_dx + (dec1_dx - dec0_dx) * z2;
-    double vc     = ec - rs / 3.0 * dec_dx / (2.0 * x);
-
-    // exchange
-    double rho13 = pow(r, 1.0 / 3.0);
-    double ex    = -Cx * r * rho13;
-    double vx    = -4.0 / 3.0 * Cx * rho13;
-
-    if (exc) exc[g] = ex + r * ec;
-    if (vxc) vxc[g] = vx + vc;
-}
-
-/* Helper kernel to combine weights and vxc for cuBLAS */
-__global__ void scale_ao_rows_kernel(int rows, int nao, 
-                                     const double *ao, 
-                                     const double *w, 
-                                     const double *vxc, 
-                                     double *ao_scaled)
-{
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int tot = rows * nao;
-    if (idx >= tot) return;
-
-    int im = idx / nao; // Row index (grid point index relative to batch)
+    vwn_ec_sub(x, vwn_param[0], ec0, dec0_dx);
     
-    double scale = w[im] * vxc[im];
-    ao_scaled[idx] = ao[idx] * scale;
+    ec = ec0;
+    
+
+    vc = ec - (rs / 3.0) * (dec0_dx / (2.0 * x));
 }
 
-/* ---------- 4. get_rho on GPU ---------- */
-__global__ void get_rho_kernel(int nao, 
-                            int ngrid, 
-                            const double *dm, 
-                            const double *ao, double *rho_out)
-{
+
+__global__ void get_rho_kernel(int nao, int ngrid, const double *dm, const double *ao, double *rho_out) {
     int g = blockIdx.x * blockDim.x + threadIdx.x;
     if (g >= ngrid) return;
-    const double *phi_g = ao + (size_t)g * nao;
-    double r = 0.0;
+
+    const double *phi = ao + (size_t)g * nao; 
+    double val = 0.0;
+
     for (int u = 0; u < nao; ++u) {
-        double phiu = phi_g[u];
+        double phiu = phi[u];
         const double *dm_row = dm + (size_t)u * nao;
         for (int v = 0; v < nao; ++v) {
-            r += dm_row[v] * phiu * phi_g[v];
+            val += dm_row[v] * phiu * phi[v];
         }
     }
-    rho_out[g] = r;
+    rho_out[g] = val;
 }
 
-/* ---------- 5. build_coulomb_matrix on GPU (naive direct contraction) ---------- */
-__global__ void build_coulomb_kernel(int nao, int rows_m, int m0,
-                                     const double *eri_slice, // (rows_m,nao,nao,nao)
-                                     const double *dm,
-                                     double *J)               
+__global__ void lda_fused_kernel(
+    int ngrid, int nao, bool compute_B,
+    const double *w, const double *rho, const double *ao,
+    double *exc_out, double *B_mat
+)
 {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int tot = rows_m * nao;
-    if (idx >= tot) return;
-    int im = idx / nao;        // 0..rows_m-1
-    int n  = idx % nao;
-    int m  = m0 + im;          
+    int k = blockIdx.x * blockDim.x + threadIdx.x; 
+    if (k >= ngrid) return;
 
-    double sum = 0.0;
-    for (int l = 0; l < nao; ++l) {
-        for (int s = 0; s < nao; ++s) {
-            size_t pos = ((size_t)im * nao + n) * nao * nao + (size_t)l * nao + s;
-            sum += dm[l * nao + s] * eri_slice[pos];
+    double r_val = rho[k];
+    
+    if (r_val < RHO_EPS) {
+        if (!compute_B && exc_out) exc_out[k] = 0.0;
+        if (compute_B) {
+            for (int i = 0; i < nao; ++i) B_mat[k * nao + i] = 0.0;
+        }
+        return;
+    }
+
+    double ex=0, vx=0;
+    double ec=0, vc=0;
+
+    slater_exchange(r_val, ex, vx);
+    vwn_correlation(r_val, ec, vc);
+
+
+    if (!compute_B && exc_out) {
+        exc_out[k] = r_val * (ex + ec); 
+        return; 
+    }
+
+
+    if (compute_B) {
+        double v_total = vx + vc;
+        double weight = w[k];
+        double factor = weight * v_total;
+
+        const double *phi_row = ao + k * nao;
+        double *B_row = B_mat + k * nao;
+
+        for (int i = 0; i < nao; ++i) {
+            B_row[i] = factor * phi_row[i];
         }
     }
-    atomicAdd_double(&J[m * nao + n], sum);
 }
 
-/* ---------- Host wrappers (extern "C") ---------- */
+__global__ void reduce_sum_kernel(const double *w, const double *val, double *out, int n) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    double sum = 0.0;
+    for (int i = tid; i < n; i += blockDim.x * gridDim.x) {
+        sum += w[i] * val[i];
+    }
+    atomicAdd(out, sum);
+}
+
+
+
 extern "C" {
 
-/* Copy VWN parameters to device once */
-static void copy_vwn_params_to_device()
-{
-    CUDA_CHECK(cudaMemcpyToSymbol(vwn_param, vwn_param_host, sizeof(VWNPar)*2));
+static cublasHandle_t handle = nullptr;
+static bool vwn_init = false;
+
+void check_vwn_init() {
+    if (!vwn_init) {
+        cudaMemcpyToSymbol(vwn_param, vwn_param_host, sizeof(VWNPar)*2);
+        vwn_init = true;
+    }
 }
 
-/* build_vxc_matrix: cuBLAS version */
-void build_vxc_matrix(int nao, int ngrid,
-                      const double *ao,    
-                      const double *weights,
-                      const double *rho,
-                      double *vxc_mat)     
+void get_rho_gpu(int nao, int ngrid, const double *d_dm, const double *d_ao, double *d_rho) {
+    int block = 128;
+    int grid = (ngrid + block - 1) / block;
+    get_rho_kernel<<<grid, block>>>(nao, ngrid, d_dm, d_ao, d_rho);
+}
+
+void build_vxc_gpu(int nao, int ngrid, 
+                   const double *d_ao, const double *d_weights, const double *d_rho,
+                   double *d_B_work, double *d_vxc) 
 {
-    size_t free_byte = 0, total_byte = 0;
-    CUDA_CHECK(cudaMemGetInfo(&free_byte, &total_byte));
-    const size_t SAFE_FREE = free_byte * 0.9;        
+    if (!handle) cublasCreate(&handle);
+    check_vwn_init();
 
-    // Buffers needed:
-    // 1. AO block (Original): rows * nao
-    // 2. AO scaled (Modified): rows * nao
-    // 3. Weights: rows
-    // 4. Rho: rows
-    // 5. Vxc: rows
-    // (Scale vector buffer is removed as we fuse it into the scaling kernel)
+    int block = 256;
+    int grid = (ngrid + block - 1) / block;
     
-    const size_t aux_buf   = 64 * 1024 * 1024;       
-    const size_t per_row   = (2 * nao + 3) * sizeof(double); 
-    const size_t left_byte = (SAFE_FREE > aux_buf) ? (SAFE_FREE - aux_buf) : 0;
-    if (left_byte == 0) {
-        std::cerr << "Not enough GPU memory to tile build_vxc_matrix!" << std::endl;
-        std::exit(EXIT_FAILURE);
-    }
-    size_t block_rows = left_byte / per_row;
-    if (block_rows < 1) block_rows = 1;
-    if (block_rows > ngrid) block_rows = ngrid;
+    lda_fused_kernel<<<grid, block>>>(
+        ngrid, nao, true, 
+        d_weights, d_rho, d_ao, 
+        nullptr, d_B_work
+    );
 
-    double *d_ao_b    = nullptr;   
-    double *d_ao_scaled = nullptr;
-    double *d_w_b     = nullptr;   
-    double *d_rho_b   = nullptr;   
-    double *d_vxc_b   = nullptr;   
-    double *d_vxc_mat = nullptr;  
 
-    CUDA_CHECK(cudaMalloc(&d_ao_b,      block_rows * nao * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_ao_scaled, block_rows * nao * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_w_b,       block_rows * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_rho_b,     block_rows * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_vxc_b,     block_rows * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_vxc_mat,   (size_t)nao * nao * sizeof(double)));
     
-    // Initialize output matrix to zero on device
-    CUDA_CHECK(cudaMemset(d_vxc_mat, 0, (size_t)nao * nao * sizeof(double)));
+    double alpha = 1.0, beta = 0.0;
+    cublasDgemm(handle,
+        CUBLAS_OP_N, CUBLAS_OP_T,
+        nao, nao, ngrid,
+        &alpha,
+        d_ao, nao,     
+        d_B_work, nao,  
+        &beta,
+        d_vxc, nao    
+    );
+}
 
-    copy_vwn_params_to_device();
+double compute_exc_gpu(int ngrid, int nao, const double *d_weights, 
+                       const double *d_rho, double *d_exc_work)
+{
+    check_vwn_init();
+    
+    int block = 256;
+    int grid = (ngrid + block - 1) / block;
 
-    cublasHandle_t handle;
-    CUBLAS_CHECK(cublasCreate(&handle));
+    lda_fused_kernel<<<grid, block>>>(
+        ngrid, nao, false, 
+        nullptr, d_rho, nullptr, 
+        d_exc_work, nullptr
+    );
 
-    const int BLOCK = 256;
+    double *d_sum;
+    cudaMalloc(&d_sum, sizeof(double));
+    cudaMemset(d_sum, 0, sizeof(double));
+    reduce_sum_kernel<<<256, 256>>>(d_weights, d_exc_work, d_sum, ngrid);
+    
+    double val;
+    cudaMemcpy(&val, d_sum, sizeof(double), cudaMemcpyDeviceToHost);
+    cudaFree(d_sum);
+    return val;
+}
+
+void build_coulomb_gpu(int nao, const double *d_eri, const double *d_dm, double *d_J) {
+    if (!handle) cublasCreate(&handle);
+
+
+    int N2 = nao * nao;
     double alpha = 1.0;
-    double beta  = 1.0; // Accumulate
+    double beta = 0.0;
 
-    for (int g0 = 0; g0 < ngrid; g0 += block_rows) {
-        int g1 = std::min(g0 + (int)block_rows, ngrid);
-        int rows = g1 - g0;
-
-        CUDA_CHECK(cudaMemcpyAsync(d_ao_b,   ao   + (size_t)g0 * nao,
-                                   rows * nao * sizeof(double), cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpyAsync(d_w_b,    weights + g0,
-                                   rows * sizeof(double), cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpyAsync(d_rho_b,  rho     + g0,
-                                   rows * sizeof(double), cudaMemcpyHostToDevice));
-
-        // 1. Calculate vxc on grid
-        int grid_g = (rows + BLOCK - 1) / BLOCK;
-        lda_exc_vxc_kernel<<<grid_g, BLOCK>>>(rows, d_rho_b, nullptr, d_vxc_b, 0.0);
-        CUDA_CHECK(cudaGetLastError());
-
-        // 2. Prepare scaled AO matrix: AO_scaled[i] = AO[i] * w[i] * vxc[i]
-        // Flattened total elements = rows * nao
-        int total_elements = rows * nao;
-        int grid_scale = (total_elements + BLOCK - 1) / BLOCK;
-        
-        scale_ao_rows_kernel<<<grid_scale, BLOCK>>>(rows, nao, d_ao_b, d_w_b, d_vxc_b, d_ao_scaled);
-        CUDA_CHECK(cudaGetLastError());
-
-        // 3. Compute Vxc contribution using GEMM
-        // Formula: V_mat = sum_g ( w * vxc * phi_i * phi_j )
-        // Matrix form: V_mat = A^T * (diag(w*vxc) * A)
-        // Let A = d_ao_b (rows x nao) in logical Row-Major.
-        // Let B = d_ao_scaled = diag(w*vxc) * A (rows x nao).
-        // V_mat = A^T * B.
-        //
-        // cuBLAS (Col-Major) View:
-        // A is stored as (nao x rows). 
-        // B is stored as (nao x rows).
-        // We want C (nao x nao).
-        // C = A * B^T (in cuBLAS view)
-        //   A (nao x rows) * B^T (rows x nao) -> (nao x nao).
-        // Wait, standard GEMM in Col-Major for C = A * B^T is:
-        // C = Op(A) * Op(B).
-        // Here, we want Logical: C_ij = sum_k A_ki * B_kj. -> C = A^T * B.
-        // In Col-Major storage, Logical A^T is represented by just A (because A_logical_row = A_cublas_col).
-        // Let's re-verify:
-        // C_cublas[i + j*ldc] = sum_k A[i + k*lda] * B[j + k*ldb] (if NT)
-        // This corresponds to C = A * B^T.
-        // A is (nao x rows). B is (nao x rows). 
-        // Result is (nao x nao). Correct.
-        
-        CUBLAS_CHECK(cublasDgemm(handle, CUBLAS_OP_N, CUBLAS_OP_T,
-                                 nao, nao, rows,
-                                 &alpha,
-                                 d_ao_b, nao,       // A
-                                 d_ao_scaled, nao,  // B
-                                 &beta,
-                                 d_vxc_mat, nao));  // C
-    }
-
-    CUDA_CHECK(cudaMemcpy(vxc_mat, d_vxc_mat, (size_t)nao * nao * sizeof(double),
-                          cudaMemcpyDeviceToHost));
-
-    CUBLAS_CHECK(cublasDestroy(handle));
-    CUDA_CHECK(cudaFree(d_ao_b));
-    CUDA_CHECK(cudaFree(d_ao_scaled));
-    CUDA_CHECK(cudaFree(d_w_b));
-    CUDA_CHECK(cudaFree(d_rho_b));
-    CUDA_CHECK(cudaFree(d_vxc_b));
-    CUDA_CHECK(cudaFree(d_vxc_mat));
-}
-
-/* compute_exc_energy: cuBLAS accelerated */
-double compute_exc_energy(int ngrid,
-                          const double *weights,
-                          const double *rho)
-{
-    size_t free_byte = 0, total_byte = 0;
-    CUDA_CHECK(cudaMemGetInfo(&free_byte, &total_byte));
-    const size_t SAFE_FREE = free_byte * 0.9;          
-
-    const size_t aux_buf   = 64 * 1024 * 1024;         
-    const size_t per_row   = 3 * sizeof(double);       // rho + weights + exc
-    const size_t left_byte = (SAFE_FREE > aux_buf) ? (SAFE_FREE - aux_buf) : 0;
-    if (left_byte == 0) {
-        std::cerr << "Not enough GPU memory to tile compute_exc_energy!" << std::endl;
-        std::exit(EXIT_FAILURE);
-    }
-    size_t block_rows = left_byte / per_row;
-    if (block_rows < 1) block_rows = 1;
-    if (block_rows > ngrid) block_rows = ngrid;
-
-    double *d_rho_b   = nullptr;
-    double *d_w_b     = nullptr;
-    double *d_exc_b   = nullptr;
-    
-    CUDA_CHECK(cudaMalloc(&d_rho_b,   block_rows * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_w_b,     block_rows * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_exc_b,   block_rows * sizeof(double)));
-
-    copy_vwn_params_to_device();
-    
-    cublasHandle_t handle;
-    CUBLAS_CHECK(cublasCreate(&handle));
-
-    const int BLOCK = 256;
-    double exc_total = 0.0;
-    
-    for (int g0 = 0; g0 < ngrid; g0 += block_rows) {
-        int g1 = std::min(g0 + (int)block_rows, ngrid);
-        int rows = g1 - g0;
-
-        CUDA_CHECK(cudaMemcpyAsync(d_rho_b, rho + g0,     rows * sizeof(double),
-                                   cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpyAsync(d_w_b,   weights + g0, rows * sizeof(double),
-                                   cudaMemcpyHostToDevice));
-
-        int grid = (rows + BLOCK - 1) / BLOCK;
-        lda_exc_vxc_kernel<<<grid, BLOCK>>>(rows, d_rho_b, d_exc_b, nullptr, 0.0);
-        CUDA_CHECK(cudaGetLastError());
-
-        // Use cuBLAS dot product for weighted sum
-        double dot_res = 0.0;
-        CUBLAS_CHECK(cublasDdot(handle, rows, d_w_b, 1, d_exc_b, 1, &dot_res));
-        exc_total += dot_res;
-    }
-
-    CUBLAS_CHECK(cublasDestroy(handle));
-    CUDA_CHECK(cudaFree(d_rho_b));
-    CUDA_CHECK(cudaFree(d_w_b));
-    CUDA_CHECK(cudaFree(d_exc_b));
-
-    return exc_total;
-}
-
-/* build_coulomb_matrix: GPU version (naive) */
-void build_coulomb_matrix(int nao,
-                          const double *eri,   // host pointer flattened 4-index
-                          const double *dm,    // host pointer (nao,nao)
-                          double *J)           // host pointer (nao,nao)
-{
-    size_t free_byte = 0, total_byte = 0;
-    CUDA_CHECK(cudaMemGetInfo(&free_byte, &total_byte));
-    const size_t SAFE_FREE = free_byte * 0.9;  
-
-    const size_t dm_bytes   = (size_t)nao * nao * sizeof(double);
-    const size_t j_bytes    = (size_t)nao * nao * sizeof(double);
-    const size_t aux_buf    = 128 * 1024 * 1024;  
-    const size_t eri_row3   = (size_t)nao * nao * nao * sizeof(double);
-    const size_t left_bytes = (SAFE_FREE > dm_bytes + j_bytes + aux_buf) ?
-                              (SAFE_FREE - dm_bytes - j_bytes - aux_buf) : 0;
-    if (left_bytes == 0) {
-        std::cerr << "Not enough GPU memory to tile build_coulomb!" << std::endl;
-        std::exit(EXIT_FAILURE);
-    }
-    size_t block_m = left_bytes / eri_row3;
-    if (block_m < 1) block_m = 1;
-    if (block_m > nao) block_m = nao;
-
-
-    double *d_dm = nullptr;
-    double *d_J  = nullptr;
-    double *d_eri_slice = nullptr;  
-    CUDA_CHECK(cudaMalloc(&d_dm, dm_bytes));
-    CUDA_CHECK(cudaMalloc(&d_J,  j_bytes));
-    CUDA_CHECK(cudaMalloc(&d_eri_slice, block_m * eri_row3));
-
-    CUDA_CHECK(cudaMemcpy(d_dm, dm, dm_bytes, cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemset(d_J, 0, j_bytes));
-
-    const int BLOCK = 256;
-    for (int m0 = 0; m0 < nao; m0 += block_m) {
-        int m1 = std::min(m0 + (int)block_m, nao);
-        int rows = m1 - m0;  
-
-        CUDA_CHECK(cudaMemcpyAsync(d_eri_slice,
-                                   eri + (size_t)m0 * nao * nao * nao,
-                                   (size_t)rows * eri_row3,
-                                   cudaMemcpyHostToDevice));
-
-        int grid = ((rows * nao) + BLOCK - 1) / BLOCK;
-        build_coulomb_kernel<<<grid, BLOCK>>>(
-                nao, rows, m0, d_eri_slice, d_dm, d_J);
-        CUDA_CHECK(cudaGetLastError());
-        CUDA_CHECK(cudaDeviceSynchronize());
-    }
-
-    CUDA_CHECK(cudaMemcpy(J, d_J, j_bytes, cudaMemcpyDeviceToHost));
-
-    CUDA_CHECK(cudaFree(d_dm));
-    CUDA_CHECK(cudaFree(d_J));
-    CUDA_CHECK(cudaFree(d_eri_slice));
-}
-
-/* solve_fock_eigen: keep using Eigen on CPU */
-void solve_fock_eigen(int n,
-                      const double *F_in,
-                      const double *S_in,
-                      double *e,
-                      double *C)
-{
-    Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, RowMajor> F(n,n);
-    Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, RowMajor> S(n,n);
-
-    std::memcpy(F.data(), F_in, n*n*sizeof(double));
-    std::memcpy(S.data(), S_in, n*n*sizeof(double));
-
-    GeneralizedSelfAdjointEigenSolver<
-        Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, RowMajor>
-    > solver(F, S, Eigen::ComputeEigenvectors);
-
-    VectorXd evalues = solver.eigenvalues();
-    auto evecs = solver.eigenvectors();
-
-    std::memcpy(e, evalues.data(), n*sizeof(double));
-    std::memcpy(C, evecs.data(),  n*n*sizeof(double));
-}
-
-/* get_rho: GPU-accelerated version */
-void get_rho(int nao, int ngrid,
-             const double *dm,
-             const double *ao,
-             double *rho_out)
-{
-    size_t free_byte = 0, total_byte = 0;
-    CUDA_CHECK(cudaMemGetInfo(&free_byte, &total_byte));
-    const size_t SAFE_FREE = free_byte * 0.9;    
-
-    const size_t dm_bytes   = (size_t)nao * nao * sizeof(double);  
-    const size_t row_bytes  = (size_t)nao * sizeof(double);      
-    const size_t rho_bytes  = sizeof(double);                    
-    const size_t aux_buf    = 64 * 1024 * 1024;                  
-    const size_t left_bytes = (SAFE_FREE > dm_bytes + aux_buf) ?
-                              (SAFE_FREE - dm_bytes - aux_buf) : 0;
-    if (left_bytes == 0) {
-        std::cerr << "Not enough GPU memory to tile get_rho!" << std::endl;
-        std::exit(EXIT_FAILURE);
-    }
-    size_t rows_per_block = left_bytes / (row_bytes + rho_bytes);
-    if (rows_per_block < 1) rows_per_block = 1;
-    if (rows_per_block > ngrid) rows_per_block = ngrid;
-
-
-
-    double *d_dm = nullptr;
-    double *d_ao_block = nullptr;   
-    double *d_rho_block = nullptr;  
-    CUDA_CHECK(cudaMalloc(&d_dm, dm_bytes));
-    CUDA_CHECK(cudaMalloc(&d_ao_block, rows_per_block * nao * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_rho_block, rows_per_block * sizeof(double)));
-    CUDA_CHECK(cudaMemcpy(d_dm, dm, dm_bytes, cudaMemcpyHostToDevice));
-
-    const int BLOCK = 128;    
-    for (int g0 = 0; g0 < ngrid; g0 += rows_per_block) {
-        int g1 = std::min(g0 + (int)rows_per_block, ngrid);
-        int rows = g1 - g0;
-
-        CUDA_CHECK(cudaMemcpyAsync(d_ao_block,
-                                   ao + (size_t)g0 * nao,
-                                   (size_t)rows * nao * sizeof(double),
-                                   cudaMemcpyHostToDevice));
-
-        int grid = (rows + BLOCK - 1) / BLOCK;
-        get_rho_kernel<<<grid, BLOCK>>>(nao, rows, d_dm, d_ao_block, d_rho_block);
-        CUDA_CHECK(cudaGetLastError());
-
-        CUDA_CHECK(cudaMemcpyAsync(rho_out + g0,
-                                   d_rho_block,
-                                   rows * sizeof(double),
-                                   cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaDeviceSynchronize());  
-    }
-
-
-    CUDA_CHECK(cudaFree(d_dm));
-    CUDA_CHECK(cudaFree(d_ao_block));
-    CUDA_CHECK(cudaFree(d_rho_block));
+    cublasDgemv(handle, CUBLAS_OP_N, 
+                N2, N2, 
+                &alpha, 
+                d_eri, N2, 
+                d_dm, 1,   
+                &beta, 
+                d_J, 1    
+    );
 }
 
 } 
-/* ---------- end of file ---------- */

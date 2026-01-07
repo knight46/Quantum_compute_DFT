@@ -1,208 +1,170 @@
 import numpy as np
+import cupy as cp
 from scipy.linalg import eigh
 import sys, ctypes, os, time
-from datetime import timedelta
 from pyscf import gto, dft
+from pyscf.scf import diis
 from grid import build, get_ao_grad
 import argparse
 
-libname = {'linux':'./weights/gga.so',
-           'darwin':'libgga.so',
-           'win32':'dft.dll'}[sys.platform]
+libname = {'linux':'./weights/gga.so', 'darwin':'libgga.so', 'win32':'dft.dll'}[sys.platform]
 lib = ctypes.CDLL(os.path.abspath(libname))
 
-lib.build_vxc_matrix_gga.argtypes = [
-    ctypes.c_int,
-    ctypes.c_int,
-    np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS'),
-    np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS'),
-    np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS'),
-    np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS'),
-    np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS'),
-    np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS'),
-    np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS')]
-lib.build_vxc_matrix_gga.restype = None
 
-lib.compute_exc_energy_gga.argtypes = [
-    ctypes.c_int,
-    np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS'),
-    np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS'),
-    np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS')]
-lib.compute_exc_energy_gga.restype = ctypes.c_double
+lib.get_rho_sigma_gpu.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+lib.build_vxc_gpu.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
 
-lib.build_coulomb_matrix.argtypes = [ctypes.c_int,
-                                     np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS'),
-                                     np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS'),
-                                     np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS')]
-lib.build_coulomb_matrix.restype = None
-
-lib.solve_fock_eigen.argtypes = [ctypes.c_int,
-                                 np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS'),
-                                 np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS'),
-                                 np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS'),
-                                 np.ctypeslib.ndpointer(ctypes.c_double, flags='C_CONTIGUOUS')]
-lib.solve_fock_eigen.restype = None
-
-lib.get_rho_sigma.restype = None
-lib.get_rho_sigma.argtypes = [
-    ctypes.c_int,
-    ctypes.c_int,
-    np.ctypeslib.ndpointer(dtype=np.float64, flags='C'),
-    np.ctypeslib.ndpointer(dtype=np.float64, flags='C'),
-    np.ctypeslib.ndpointer(dtype=np.float64, flags='C'),
-    np.ctypeslib.ndpointer(dtype=np.float64, flags='C'),
-    np.ctypeslib.ndpointer(dtype=np.float64, flags='C'),
-    np.ctypeslib.ndpointer(dtype=np.float64, flags='C'),
-]
-
-def get_rho_grad(dm, ao_values, ao_grad):
-    ngrid, nao = ao_values.shape
-    rho   = np.empty(ngrid, dtype=np.float64)
-    sigma = np.empty(ngrid, dtype=np.float64)
-    grad_rho = np.empty((ngrid, 3), dtype=np.float64)
-    lib.get_rho_sigma(nao, ngrid,
-                      np.ascontiguousarray(dm, dtype=np.float64),
-                      np.ascontiguousarray(ao_values, dtype=np.float64),
-                      np.ascontiguousarray(ao_grad,  dtype=np.float64),
-                      rho, sigma, grad_rho)
-    rho   = np.clip(rho,   1e-12, None)
-    return rho, sigma, grad_rho
-
-def build_vxc_matrix(dm, ao_values, ao_grad, grids):
-    rho, sigma, grad_rho = get_rho_grad(dm, ao_values, ao_grad)
-    nao, ngrid = ao_values.shape[1], ao_values.shape[0]
-    ao_c   = np.ascontiguousarray(ao_values,  dtype=np.float64)
-    aograd_c = np.ascontiguousarray(ao_grad, dtype=np.float64)
-    w_c    = np.ascontiguousarray(grids.weights, dtype=np.float64)
-    rho_c  = np.ascontiguousarray(rho,  dtype=np.float64)
-    sig_c  = np.ascontiguousarray(sigma, dtype=np.float64)
-    grho_c = np.ascontiguousarray(grad_rho, dtype=np.float64)
-    vxc_mat = np.empty((nao, nao), dtype=np.float64, order='C')
-    lib.build_vxc_matrix_gga(nao, ngrid, ao_c, aograd_c, w_c, rho_c, sig_c, grho_c, vxc_mat)
-    return vxc_mat
-
-def compute_exc_energy(dm, ao_values, ao_grad, grids):
-    rho, sigma, _ = get_rho_grad(dm, ao_values, ao_grad)
-    w_c   = np.ascontiguousarray(grids.weights, dtype=np.float64)
-    rho_c = np.ascontiguousarray(rho,  dtype=np.float64)
-    sig_c = np.ascontiguousarray(sigma, dtype=np.float64)
-    return lib.compute_exc_energy_gga(len(grids.coords), w_c, rho_c, sig_c)
-
-def build_coulomb_matrix(dm, eri):
-    nao = dm.shape[0]
-    dm_c = np.ascontiguousarray(dm, dtype=np.float64)
-    eri_c = np.ascontiguousarray(eri.reshape(-1), dtype=np.float64)
-    J = np.empty((nao, nao), dtype=np.float64, order='C')
-    lib.build_coulomb_matrix(nao, eri_c, dm_c, J)
-    return J
-
-def solve_fock_equation(F, S):
-    n = F.shape[0]
-    e = np.empty(n)
-    C = np.empty((n, n), order='C')
-    lib.solve_fock_eigen(n,
-                         np.ascontiguousarray(F, dtype=np.float64),
-                         np.ascontiguousarray(S, dtype=np.float64),
-                         e, C)
-    C = C.reshape(n, n).T
-    return e, C
-
-def adaptive_mixing(dm_new, dm_old, cycle, dm_change):
-    if cycle < 10:
-        mix_param = 0.1
-    elif dm_change > 1e-3:
-        mix_param = 0.2
-    elif dm_change > 1e-4:
-        mix_param = 0.3
-    else:
-        mix_param = 0.5
-    return mix_param * dm_new + (1 - mix_param) * dm_old
+lib.compute_exc_gpu.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+lib.compute_exc_gpu.restype = ctypes.c_double
+lib.build_coulomb_gpu.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
 
 def load_xyz_as_pyscf_atom(xyz_path):
-    with open(xyz_path, "r") as f:
-        lines = f.readlines()
-    atom_lines = lines[2:]
-    atom_list = []
-    for line in atom_lines:
-        parts = line.split()
-        if len(parts) < 4:
-            continue
-        sym = parts[0]
-        x, y, z = parts[1:4]
-        atom_list.append(f"{sym} {x} {y} {z}")
-    return "\n".join(atom_list)
+    with open(xyz_path, "r") as f: lines = f.readlines()
+    return "".join(lines[2:])
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run GGA calculation for a given molecule.")
-    parser.add_argument("xyzfile", type=str, help="Name of the molecule (e.g., h2o, dha)")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("xyzfile", type=str)
     args = parser.parse_args()
 
-    atom = args.xyzfile
-    if not atom.lower().endswith(".xyz"):
-        atom += ".xyz"
+    atom_file = args.xyzfile if args.xyzfile.lower().endswith(".xyz") else args.xyzfile + ".xyz"
+    grid_path = f"./grid_txt/{atom_file.replace('.xyz', '')}_grid.txt"
+    atom_path = f"./atom_txt/{atom_file}"
 
-    try:
-        with open(f"./atom_txt/{atom}", "r") as f:
-            pass
-    except FileNotFoundError:
-        print(f"Error: No structure found for molecule {atom}.")
+    if not os.path.exists(atom_path):
+        print(f"Error: {atom_path} not found.")
         exit(1)
 
-    grid_add = f"./grid_txt/{atom}_grid.txt"
-    atom_structure = load_xyz_as_pyscf_atom(f"./atom_txt/{atom}")
-    Hcore, S, nocc, T, eri, ao_values, grids, E_nuc = build(atom_structure, grid_add)
+    print("Building CPU data...")
+    atom_structure = load_xyz_as_pyscf_atom(atom_path)
+    Hcore, S, nocc, T, eri, ao_values, grids, E_nuc = build(atom_structure, grid_path)
     ao_grad = get_ao_grad(atom_structure, grids)
+    
+    ngrid, nao = ao_values.shape
+    print(f"System Info: NAO={nao}, Grid={ngrid}, Occupied={nocc}")
 
-    e_init, C_init = eigh(Hcore, S)
-    dm = 2 * C_init[:, :nocc] @ C_init[:, :nocc].T
-    start_time = time.time()
+    print("Moving data to GPU...")
+    t_start_gpu = time.time()
+    
+    d_ao      = cp.asarray(ao_values, dtype=np.float64, order='C')
+    d_ao_grad = cp.asarray(ao_grad,   dtype=np.float64, order='C')
+    d_weights = cp.asarray(grids.weights, dtype=np.float64, order='C')
+    
+    d_eri = cp.asarray(eri.reshape(nao*nao, nao*nao), dtype=np.float64, order='C')
+    
+    d_dm       = cp.zeros((nao, nao), dtype=np.float64, order='C')
+    d_J        = cp.zeros((nao, nao), dtype=np.float64, order='C')
+    d_vxc      = cp.zeros((nao, nao), dtype=np.float64, order='C')
+    d_rho      = cp.zeros(ngrid, dtype=np.float64)
+    d_sigma    = cp.zeros(ngrid, dtype=np.float64)
+    d_grad_rho = cp.zeros((ngrid, 3), dtype=np.float64)
+    
+    d_B_work   = cp.zeros((ngrid, nao), dtype=np.float64, order='C')
+    d_exc_work = cp.zeros(ngrid, dtype=np.float64)
+
+    cp.cuda.Stream.null.synchronize()
+    print(f"GPU Init Time: {time.time() - t_start_gpu:.4f}s")
+
+    e, C = eigh(Hcore, S)
+    dm = 2 * C[:, :nocc] @ C[:, :nocc].T
+    
+    adiis = diis.CDIIS()
+
     print("\nSCF started!")
-    print("-" * 70)
+    print("-" * 65)
     print(f"{'epoch':>4} {'tot energy':>15} {'Δenergy':>12} {'Δdensity':>12}")
-    print("-" * 70)
+    print("-" * 65)
 
-    converged = False
     E_old = 0.0
-    Vxc_time, Exc_time = [], []
+    converged = False
 
-    for cycle in range(100):
-        J = build_coulomb_matrix(dm, eri)
-        t1 = time.time()
-        Vxc = build_vxc_matrix(dm, ao_values, ao_grad, grids)
-        t2 = time.time()
-        Vxc_time.append(t2 - t1)
-        F = Hcore + J + Vxc
-        e, C = solve_fock_equation(F, S)
+    p_ao      = d_ao.data.ptr
+    p_ao_grad = d_ao_grad.data.ptr
+    p_weights = d_weights.data.ptr
+    p_eri     = d_eri.data.ptr
+    
+    p_dm      = d_dm.data.ptr
+    p_J       = d_J.data.ptr
+    p_vxc     = d_vxc.data.ptr
+    p_rho     = d_rho.data.ptr
+    p_sigma   = d_sigma.data.ptr
+    p_grho    = d_grad_rho.data.ptr
+    p_B       = d_B_work.data.ptr
+    p_exc_w   = d_exc_work.data.ptr
+    
+    start_time = time.time()
+
+    vxc_times = []
+    exc_times = []
+
+    for cycle in range(200):
+        d_dm.set(dm)
+
+        lib.build_coulomb_gpu(nao, p_eri, p_dm, p_J)
+
+        lib.get_rho_sigma_gpu(nao, ngrid, p_dm, p_ao, p_ao_grad, p_rho, p_sigma, p_grho)
+        
+        cp.cuda.Stream.null.synchronize()
+        t_vxc_start = time.time()
+        
+        lib.build_vxc_gpu(nao, ngrid, p_ao, p_ao_grad, p_weights, p_rho, p_sigma, p_grho, p_B, p_vxc)
+        
+        cp.cuda.Stream.null.synchronize()
+        t_vxc_end = time.time()
+        vxc_times.append(t_vxc_end - t_vxc_start)
+        
+        t_exc_start = time.time()
+        
+        E_xc = lib.compute_exc_gpu(ngrid, nao, p_weights, p_rho, p_sigma, p_exc_w)
+        
+        t_exc_end = time.time()
+        exc_times.append(t_exc_end - t_exc_start)
+
+        J_cpu = d_J.get()
+        Vxc_raw = d_vxc.get()
+        
+        Vxc_cpu = 0.5 * (Vxc_raw + Vxc_raw.T)
+        F = Hcore + J_cpu + Vxc_cpu
+
+        F = adiis.update(S, dm, F)
+
+        e, C = eigh(F, S)
+        
         dm_new = 2 * C[:, :nocc] @ C[:, :nocc].T
-        E_one  = np.einsum('ij,ji->', dm_new, Hcore)
-        E_coul = 0.5 * np.einsum('ij,ji->', dm_new, J)
-        t3 = time.time()
-        E_xc = compute_exc_energy(dm_new, ao_values, ao_grad, grids)
-        t4 = time.time()
-        Exc_time.append(t4 - t3)
-        E_tot = E_one + E_coul + E_xc + E_nuc
-        dE    = E_tot - E_old
+        
+        E_one  = np.sum(dm_new * Hcore)
+        E_coul = 0.5 * np.sum(dm_new * J_cpu)
+        E_tot  = E_one + E_coul + E_xc + E_nuc
+        
+        dE = E_tot - E_old
         dm_change = np.linalg.norm(dm_new - dm)
-
-        print(f"{cycle+1:4d} {E_tot:15.8f} {dE:12.6e} {dm_change:12.6e}")
+        
+        print(f"{cycle+1:4d} {E_tot:18.8f} {dE:15.6e} {dm_change:15.6e}")
 
         if abs(dE) < 1e-8 and dm_change < 1e-6:
             converged = True
             end_time = time.time()
-            print(f"SCF converged! E = {E_tot:.8f} Hartree")
-            print(f' E_one  : {E_one:.6f} Hartree')
-            print(f' E_coul : {E_coul:.6f} Hartree')
-            print(f' E_exc  : {E_xc:.6f} Hartree')
-            print(f"Vxc_average_time: {sum(Vxc_time)/len(Vxc_time)*1000:.6f} ms")
-            print(f"Exc_average_time: {sum(Exc_time)/len(Exc_time)*1000:.6f} ms")
-            print(f"Total time: {end_time - start_time:.6f} s\n")
+            
+            avg_vxc = sum(vxc_times) / len(vxc_times) * 1000 
+            avg_exc = sum(exc_times) / len(exc_times) * 1000 
+            
+            print("-" * 65)
+            print(f"Converged!")
+            print(f"Total Energy: {E_tot:.8f} Ha")
+            print(f"Total Time: {end_time - start_time:.4f} s")
+            print("-" * 65)
+            print(f"Performance Statistics (Average per iteration):")
+            print(f"Vxc Time: {avg_vxc:.4f} ms")
+            print(f"Exc Time : {avg_exc:.4f} ms")
+            print("-" * 65)
+            print("")
             break
 
-        dm = adaptive_mixing(dm_new, dm, cycle, dm_change)
+        dm = dm_new
         E_old = E_tot
 
     if not converged:
-        print("Warning: SCF unconverged!")
+        print("SCF Unconverged.")
 
     mol = gto.Mole()
     mol.atom = atom_structure
@@ -213,15 +175,17 @@ if __name__ == "__main__":
     mf = dft.RKS(mol)
     mf.xc = 'PBE'
     mf.kernel()
-    dm = mf.make_rdm1()
-
-    h1 = mol.intor('int1e_kin') + mol.intor('int1e_nuc')
-    E1 = np.einsum('ij,ji->', h1, dm)
-    vh = mf.get_j(mol, dm)
-    Ecoul = 0.5 * np.einsum('ij,ji->', vh, dm)
-    Exc   = mf.energy_elec()[0] - (E1 + Ecoul)
-    Etot  = mf.energy_tot()
+    dm_ref = mf.make_rdm1()
     elapsed = time.time() - start
+
+    Etot  = mf.energy_tot()
+    h1 = mol.intor('int1e_kin') + mol.intor('int1e_nuc')
+    E1 = np.einsum('ij,ji->', h1, dm_ref)
+    vh = mf.get_j(mol, dm_ref)
+    Ecoul = 0.5 * np.einsum('ij,ji->', vh, dm_ref)
+    Exc   = mf.energy_elec()[0] - (E1 + Ecoul)
+    
+    
 
     print('PySCF (PBE) reference:')
     print(f' E_one  : {E1:.6f} Hartree')

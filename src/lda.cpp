@@ -9,10 +9,8 @@ using Eigen::VectorXd;
 using Eigen::GeneralizedSelfAdjointEigenSolver;
 using Eigen::RowMajor;
 
-/* ---------- 1. LDA 交换-相关 ---------- */
 extern "C" {
 
-/* ---------- 参数表 ---------- */
 struct VWNPar {
     double A, b, c, x0;
 };
@@ -67,32 +65,29 @@ inline void lda_exc_vxc_impl(int n, const double *rho,
     }
 }
 
-/* ---------- 唯一对外 C 接口：4 参数 ---------- */
 void lda_exc_vxc(int n, const double *rho, double *exc, double *vxc)
 {
-    lda_exc_vxc_impl(n, rho, exc, vxc, 0.0);   // 默认顺磁
+    lda_exc_vxc_impl(n, rho, exc, vxc, 0.0);   
 }
 
-} // extern "C"
+} 
 
 
 
- // extern "C"
 
-/* ---------- 2. 构建 Vxc 矩阵 ---------- */
+
 extern "C"
 void build_vxc_matrix(int nao, int ngrid,
-                      const double *ao,     // shape (ngrid, nao)
+                      const double *ao,     
                       const double *weights,
                       const double *rho,
-                      double *vxc_mat)      // shape (nao, nao)
+                      double *vxc_mat)      
 {
     double *exc_buf = (double*)malloc(sizeof(double)*ngrid);
     double *vxc_buf = (double*)malloc(sizeof(double)*ngrid);
 
     lda_exc_vxc(ngrid, rho, exc_buf, vxc_buf);
 
-    // vxc_mat[i,j] = Σ_g w[g] * vxc[g] * ao[g,i] * ao[g,j]
     std::memset(vxc_mat, 0, sizeof(double)*nao*nao);
 
     for (int g = 0; g < ngrid; ++g) {
@@ -109,7 +104,6 @@ void build_vxc_matrix(int nao, int ngrid,
 }
 
 
-/* ---------- 3. 计算 E_xc ---------- */
 extern "C"
 double compute_exc_energy(int ngrid,
                           const double *weights,
@@ -130,7 +124,6 @@ double compute_exc_energy(int ngrid,
 }
 
 
-/* ---------- 4. 构建 Coulomb 矩阵 ---------- */
 extern "C"
 void build_coulomb_matrix(int nao,
                           const double *eri,  
@@ -152,7 +145,7 @@ void solve_fock_eigen(int n,
                       double *e,
                       double *C)
 {
-    // 显式指定 RowMajor
+
     Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, RowMajor> F(n,n);
     Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, RowMajor> S(n,n);
 
@@ -163,8 +156,8 @@ void solve_fock_eigen(int n,
         Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, RowMajor>
     > solver(F, S, Eigen::ComputeEigenvectors);
 
-    VectorXd evalues = solver.eigenvalues();  // 升序
-    auto evecs = solver.eigenvectors();       // 已经是 RowMajor
+    VectorXd evalues = solver.eigenvalues();  
+    auto evecs = solver.eigenvectors();      
 
     std::memcpy(e, evalues.data(), n*sizeof(double));
     std::memcpy(C, evecs.data(),  n*n*sizeof(double));
