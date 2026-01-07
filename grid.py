@@ -5,6 +5,7 @@ from pyscf import gto, scf, dft
 from scipy.linalg import eigh
 
 
+# ==== 1. Build integration grid and AO values ====
 def init_grid(mol, grid_add, level=3):
     grids = dft.gen_grid.Grids(mol)
     grids.level = level
