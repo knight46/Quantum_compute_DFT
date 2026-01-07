@@ -1,11 +1,9 @@
-# grid.py 
 
 import numpy as np
 from pyscf import gto, scf, dft
 from scipy.linalg import eigh
 
 
-# ==== 1. Build integration grid and AO values ====
 def init_grid(mol, grid_add, level=3):
     grids = dft.gen_grid.Grids(mol)
     grids.level = level
@@ -17,9 +15,9 @@ def init_grid(mol, grid_add, level=3):
     weights_c = data[:, 4]
     grids.coords = coords_c
     grids.weights = weights_c
-    ao = dft.numint.eval_ao(mol, grids.coords)  # (ngrid, nao)
+    ao = dft.numint.eval_ao(mol, grids.coords)  
     print("ao shape: ",ao.shape)
-    print("grid coords shape:", grids.coords.shape) #every x y z no boxes
+    print("grid coords shape:", grids.coords.shape) 
     return grids, ao
 
 

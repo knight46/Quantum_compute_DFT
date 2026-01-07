@@ -78,17 +78,16 @@ void lda_exc_vxc(int n, const double *rho, double *exc, double *vxc)
 
 extern "C"
 void build_vxc_matrix(int nao, int ngrid,
-                      const double *ao,     // shape (ngrid, nao)
+                      const double *ao,     
                       const double *weights,
                       const double *rho,
-                      double *vxc_mat)      // shape (nao, nao)
+                      double *vxc_mat)      
 {
     double *exc_buf = (double*)malloc(sizeof(double)*ngrid);
     double *vxc_buf = (double*)malloc(sizeof(double)*ngrid);
 
     lda_exc_vxc(ngrid, rho, exc_buf, vxc_buf);
 
-    // vxc_mat[i,j] = Σ_g w[g] * vxc[g] * ao[g,i] * ao[g,j]
     std::memset(vxc_mat, 0, sizeof(double)*nao*nao);
 
     for (int g = 0; g < ngrid; ++g) {

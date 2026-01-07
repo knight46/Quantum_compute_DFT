@@ -96,7 +96,6 @@ __device__ inline void pbe_correlation(double rho, double sigma, double &ec, dou
     vrho = vc_lda + H + rho * (dH_dA * dA_drho + dH_dt2 * dt2_drho);
 }
 
-// --- Kernels ---
 
 
 __global__ void get_rho_sigma_kernel_planar(int nao, int rows, const double *dm, const double *ao, 
@@ -250,8 +249,8 @@ void build_vxc_gpu(int nao, int ngrid,
         CUBLAS_OP_N, CUBLAS_OP_T,
         nao, nao, ngrid,
         &alpha,
-        d_ao, nao,      // A: nao x ngrid (View)
-        d_B_work, nao,  // B: nao x ngrid (View) -> Transpose
+        d_ao, nao,      
+        d_B_work, nao,  
         &beta,
         d_vxc, nao
     );
@@ -297,11 +296,11 @@ void build_coulomb_gpu(int nao, const double *d_eri, const double *d_dm, double 
     cublasDgemv(handle, CUBLAS_OP_N, 
                 N2, N2, 
                 &alpha, 
-                d_eri, N2, // A
-                d_dm, 1,   // x
+                d_eri, N2, 
+                d_dm, 1,   
                 &beta, 
-                d_J, 1     // y
+                d_J, 1     
     );
 }
 
-} // extern C
+} 
