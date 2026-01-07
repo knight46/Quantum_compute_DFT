@@ -11,30 +11,26 @@ import argparse
 libname = {'linux':'./weights/lda.so', 'darwin':'liblda.so', 'win32':'lda.dll'}[sys.platform]
 lib = ctypes.CDLL(os.path.abspath(libname))
 
-# ----------------- C Types Definition (LDA Specific) -----------------
 
 
-# void get_rho_gpu(int nao, int ngrid, double *dm, double *ao, double *rho)
+
 lib.get_rho_gpu.argtypes = [
     ctypes.c_int, ctypes.c_int, 
     ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p
 ]
 
-# void build_vxc_gpu(int nao, int ngrid, double *ao, double *weights, double *rho, double *B, double *vxc)
 lib.build_vxc_gpu.argtypes = [
     ctypes.c_int, ctypes.c_int, 
     ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, 
     ctypes.c_void_p, ctypes.c_void_p
 ]
 
-# double compute_exc_gpu(int ngrid, int nao, double *weights, double *rho, double *exc_work)
 lib.compute_exc_gpu.argtypes = [
     ctypes.c_int, ctypes.c_int, 
     ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p
 ]
 lib.compute_exc_gpu.restype = ctypes.c_double
 
-# void build_coulomb_gpu(int nao, double *eri, double *dm, double *J)
 lib.build_coulomb_gpu.argtypes = [
     ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p
 ]

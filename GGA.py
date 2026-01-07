@@ -10,7 +10,6 @@ import argparse
 libname = {'linux':'./weights/gga.so', 'darwin':'libgga.so', 'win32':'dft.dll'}[sys.platform]
 lib = ctypes.CDLL(os.path.abspath(libname))
 
-# ----------------- C Types Definition -----------------
 
 lib.get_rho_sigma_gpu.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
 lib.build_vxc_gpu.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]

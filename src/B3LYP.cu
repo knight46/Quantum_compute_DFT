@@ -296,7 +296,6 @@ __global__ void reduce_sum_kernel(const double *w, const double *val, double *ou
 }
 
 
-// --- Host Interface (extern C) ---
 
 extern "C" {
 
@@ -392,4 +391,4 @@ void build_coulomb_gpu(int nao, const double *d_eri, const double *d_dm, double 
     ));
 }
 
-} // extern C
+} 
