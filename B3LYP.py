@@ -45,7 +45,6 @@ def load_xyz_as_pyscf_atom(xyz_path):
     with open(xyz_path, "r") as f: lines = f.readlines()
     return "".join(lines[2:])
 
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("xyzfile", type=str, help="Path to XYZ file (e.g., H2O.xyz)")
@@ -59,9 +58,10 @@ if __name__ == "__main__":
         atom_path = atom_file 
 
     print(f"Reading atom: {atom_path}")
-    print("Building CPU data...")
     
     atom_structure = load_xyz_as_pyscf_atom(atom_path)
+    
+    print("Building CPU data...")
     Hcore, S, nocc, T, eri, ao_values, grids, E_nuc = build(atom_structure, grid_path)
     ao_grad = get_ao_grad(atom_structure, grids)
     
@@ -71,9 +71,9 @@ if __name__ == "__main__":
     print("Moving data to GPU...")
     t_start_gpu = time.time()
     
-    d_ao      = cp.asarray(ao_values, dtype=np.float64, order='C')
-    d_ao_grad = cp.asarray(ao_grad,   dtype=np.float64, order='C')
-    d_weights = cp.asarray(grids.weights, dtype=np.float64, order='C')
+    d_ao          = cp.asarray(ao_values, dtype=np.float64, order='C')
+    d_ao_grad     = cp.asarray(ao_grad,   dtype=np.float64, order='C')
+    d_weights     = cp.asarray(grids.weights, dtype=np.float64, order='C')
     
     eri_np = eri.reshape(nao, nao, nao, nao)
     d_eri_4d = cp.asarray(eri_np, dtype=np.float64, order='C')
@@ -123,15 +123,12 @@ if __name__ == "__main__":
     vxc_times = []
     exc_times = []
     
-
     c_hf = 0.2
 
     for cycle in range(100):
         d_dm.set(dm)
 
-
         lib.build_coulomb_gpu(nao, p_eri_flat, p_dm, p_J)
-
 
         d_K = cp.einsum('ijkl,jl->ik', d_eri_4d, d_dm)
 
@@ -156,7 +153,6 @@ if __name__ == "__main__":
         Vxc_dft_cpu = d_vxc.get()
         Vxc_dft_cpu = 0.5 * (Vxc_dft_cpu + Vxc_dft_cpu.T)
 
-        # F = Hcore + J + Vxc_DFT - 0.2 * 0.5 * K
         F = Hcore + J_cpu + Vxc_dft_cpu - (c_hf * 0.5 * K_cpu)
         
         e, C = eigh(F, S)
@@ -164,10 +160,7 @@ if __name__ == "__main__":
         
         E_one  = np.sum(dm_new * Hcore)
         E_coul = 0.5 * np.sum(dm_new * J_cpu)
-        
-
         E_ex_hf = -0.25 * c_hf * np.sum(dm_new * K_cpu)
-        
         E_tot  = E_one + E_coul + E_xc_dft + E_ex_hf + E_nuc
         
         dE = E_tot - E_old
@@ -185,16 +178,16 @@ if __name__ == "__main__":
             print("-" * 85)
             print(f"Converged!")
             print(f"Total Energy: {E_tot:.8f} Ha")
-            print(f"  E_one    : {E_one:.8f}")
-            print(f"  E_coul   : {E_coul:.8f}")
-            print(f"  E_ex_hf  : {E_ex_hf:.8f}")
-            print(f"  E_xc_dft : {E_xc_dft:.8f}")
+            print(f"  E_one     : {E_one:.8f}")
+            print(f"  E_coul    : {E_coul:.8f}")
+            print(f"  E_ex_hf   : {E_ex_hf:.8f}")
+            print(f"  E_xc_dft  : {E_xc_dft:.8f}")
             print(f"Total Time: {end_time - start_time:.4f} s")
-            print("-" * 85)
+            print("-" * 65)
             print(f"Performance Statistics (Average per iteration):")
             print(f"Vxc Time: {avg_vxc:.4f} ms")
             print(f"Exc Time : {avg_exc:.4f} ms")
-            print("-" * 85)
+            print("-" * 65)
             print("")
             break
 
@@ -204,50 +197,104 @@ if __name__ == "__main__":
     if not converged:
         print("SCF Unconverged.")
 
-    print("Running PySCF Reference...")
+
+    print("\n" + "="*85)
+    print("ANALYSIS & VERIFICATION (Real CUDA Output vs PySCF)")
+    print("="*85)
+    s_time = time.time()
     mol = gto.Mole()
     mol.atom = atom_structure
     mol.basis = 'sto-3g'
+    mol.unit = 'Angstrom' 
     mol.verbose = 0
     mol.build()
 
-    start = time.time()
     mf = dft.RKS(mol)
-    
-
-    mf.xc = 'B3LYP' 
-
-    
+    mf.xc = 'b3lyp'
+    mf.grids.prune = None 
     mf.kernel()
-    
     dm_ref = mf.make_rdm1()
     
-    h1 = mol.intor('int1e_kin') + mol.intor('int1e_nuc')
-    E1 = np.einsum('ij,ji->', h1, dm_ref)
-    
-    vj, vk = mf.get_jk(mol, dm_ref)
-    Ecoul = 0.5 * np.einsum('ij,ji->', vj, dm_ref)
-    E_hf_ex = -0.25 * 0.2 * np.einsum('ij,ji->', vk, dm_ref) 
-    
-    Etot_ref = mf.e_tot
-    E_dft_xc = Etot_ref - (E1 + Ecoul + E_hf_ex + E_nuc)
+    print(f"PySCF Ref Total Energy : {mf.e_tot:.8f} Ha")
+    print(f"CUDA  Code Total Energy: {E_tot:.8f} Ha")
+    print(f"Difference             : {E_tot - mf.e_tot:.8f} Ha")
+    print(f'PySCF_time             : {time.time() - s_time:.4f} s')
+    print("-" * 85)
 
-    elapsed = time.time() - start
+    lib.get_xc_components_gpu.argtypes = [
+        ctypes.c_int, ctypes.c_int,
+        ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+        ctypes.c_void_p
+    ]
 
-    print('\nPySCF (B3LYP5) Reference Results:')
-    print(f' E_one      : {E1:.6f} Hartree')
-    print(f' E_coul     : {Ecoul:.6f} Hartree')
-    print(f' E_ex_hf    : {E_hf_ex:.6f} Hartree ')
-    print(f' E_xc_dft   : {E_dft_xc:.6f} Hartree ')
-    print(f' E_tot      : {Etot_ref:.8f} Hartree')
-    print(f' Time       : {elapsed:.6f} s')
+    c_out_components = (ctypes.c_double * 4)()
     
-    diff = abs(E_tot - Etot_ref)
-    print(f"\nDifference: {diff:.2e} Ha")
+    p_weights = d_weights.data.ptr
+    p_rho     = d_rho.data.ptr
+    p_sigma   = d_sigma.data.ptr
     
-    if diff < 1e-6:
-        print(">> SUCCESS: Implementation matches PySCF!")
-    elif diff < 1e-4:
-        print(">> ACCEPTABLE: Small grid/numerical discrepancy.")
+    lib.get_xc_components_gpu(ngrid, nao, p_weights, p_rho, p_sigma, c_out_components)
+    
+    raw_lda_cuda = c_out_components[0]
+    raw_b88_cuda = c_out_components[1]
+    raw_vwn_cuda = c_out_components[2]
+    raw_lyp_cuda = c_out_components[3]
+
+    COEFF_LDA = 0.80
+    COEFF_B88 = 0.72
+    COEFF_VWN = 0.19
+    COEFF_LYP = 0.81
+
+    e_lda_cuda_final = COEFF_LDA * raw_lda_cuda
+    e_b88_cuda_final = COEFF_B88 * raw_b88_cuda
+    e_vwn_cuda_final = COEFF_VWN * raw_vwn_cuda
+    e_lyp_cuda_final = COEFF_LYP * raw_lyp_cuda
+
+    rho_gpu_final = d_rho.get()
+    grad_gpu_final = d_grad_rho.get().T
+    weights_cpu = d_weights.get()
+    
+    rho_input_lda = rho_gpu_final.reshape(1, -1)
+    rho_input_gga = np.vstack([rho_gpu_final, grad_gpu_final])
+
+    def get_pyscf_value(xc_code, is_gga=False):
+        inp = rho_input_gga if is_gga else rho_input_lda
+        exc, _, _, _ = dft.libxc.eval_xc(xc_code, inp, spin=0, verbose=0)
+
+        return np.dot(exc * rho_gpu_final, weights_cpu)
+
+    ref_raw_lda = get_pyscf_value("LDA_X")
+
+    ref_raw_b88_full = get_pyscf_value("B88", is_gga=True)
+    ref_raw_b88_corr = ref_raw_b88_full - ref_raw_lda
+    
+    ref_raw_vwn = get_pyscf_value("VWN3") 
+    ref_raw_lyp = get_pyscf_value("GGA_C_LYP", is_gga=True)
+
+    e_lda_ref = COEFF_LDA * ref_raw_lda
+    e_b88_ref = COEFF_B88 * ref_raw_b88_corr
+    e_vwn_ref = COEFF_VWN * ref_raw_vwn
+    e_lyp_ref = COEFF_LYP * ref_raw_lyp
+    rho_input = np.vstack([rho_gpu_final, grad_gpu_final])
+    exc, vxc, _, _ = dft.libxc.eval_xc('GGA_C_LYP', rho_input, spin=0, verbose=0)
+    dft_exc = 0.81 * np.dot(exc * rho_gpu_final, weights_cpu)
+
+    print(f"{'Component':<20} {'CUDA Output (Ha)':<25} {'PySCF Ref (Ha)':<25} {'Diff (Ha)':<12}")
+    print("-" * 85)
+    
+    print(f"{'LDA Exchange':<20} {e_lda_cuda_final:18.8f} {e_lda_ref:18.8f} {e_lda_cuda_final - e_lda_ref:22.8f}")
+    print(f"{'B88 Correction':<20} {e_b88_cuda_final:18.8f} {e_b88_ref:18.8f} {e_b88_cuda_final - e_b88_ref:22.8f}")
+    print(f"{'VWN Correlation':<20} {e_vwn_cuda_final:18.8f} {e_vwn_ref:18.8f} {e_vwn_cuda_final - e_vwn_ref:22.8f}")
+    print(f"{'LYP Correlation':<20} {e_lyp_cuda_final:18.8f} {e_lyp_ref:18.8f} {e_lyp_cuda_final - e_lyp_ref:22.8f}")
+    
+    print("-" * 85)
+    total_xc_cuda = e_lda_cuda_final + e_b88_cuda_final + e_vwn_cuda_final + e_lyp_cuda_final
+    total_xc_ref  = e_lda_ref + e_b88_ref + e_vwn_ref + e_lyp_ref
+    
+    print(f"{'Total XC Energy':<20} {total_xc_cuda:18.8f} {total_xc_ref:18.8f} {total_xc_cuda - total_xc_ref:22.8f}")
+    print(f"{'Real E_xc_dft':<20} {E_xc_dft:25.8f} (From SCF loop)")
+
+    if abs(total_xc_cuda - E_xc_dft) > 1e-6:
+        print("\n[Warning] Analysis sum does not match SCF loop sum. Check coefficients or integration.")
     else:
-        print(">> WARNING: Discrepancy still exists.")
+        print("\n[Success] Analysis breakdown matches the total energy used in SCF.")

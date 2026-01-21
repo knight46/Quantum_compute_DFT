@@ -4,6 +4,7 @@
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
 #include <algorithm>
+#include <iostream>
 
 #define CUDA_CHECK(call) do{ cudaError_t err=(call); if(err!=cudaSuccess){ fprintf(stderr,"CUDA Error: %s:%d\n",__FILE__,__LINE__); } }while(0)
 #define CUBLAS_CHECK(call) do{ cublasStatus_t err=(call); if(err!=CUBLAS_STATUS_SUCCESS){ fprintf(stderr,"CUBLAS Error at line %d\n",__LINE__); } }while(0)
@@ -166,6 +167,16 @@ void build_vxc_gpu(int nao, int ngrid,
                    const double *d_ao, const double *d_weights, const double *d_rho,
                    double *d_B_work, double *d_vxc) 
 {
+    
+    // double h[3] = {0};
+    // double h_stride = 0.0;
+    // cudaMemcpy(h,       d_ao,          3*sizeof(double), cudaMemcpyDeviceToHost);
+    // cudaMemcpy(&h_stride, d_ao + nao,  sizeof(double),   cudaMemcpyDeviceToHost);
+    // cudaDeviceSynchronize();
+    // std::cout << "[DEBUG] d_ao[0~2] = "
+    //           << h[0] << ", " << h[1] << ", " << h[2] << '\n'
+    //           << "[DEBUG] d_ao[nao] = " << h_stride << std::endl;
+    
     if (!handle) cublasCreate(&handle);
     check_vwn_init();
 

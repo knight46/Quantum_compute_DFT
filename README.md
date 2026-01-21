@@ -1,9 +1,8 @@
-
-
 # DFT Functionals with Gaussian Basis Sets
 
-This repository provides CUDA- and CPU-based implementations of Density Functional Theory (DFT) exchange–correlation functionals using **Gaussian basis sets**, including **LDA** and **GGA**.
-The CUDA implementations are designed for **GPU acceleration**, while CPU fallbacks are also provided for verification and comparison.
+This repository provides **CUDA- and CPU-based implementations of Density Functional Theory (DFT) exchange–correlation functionals** using **Gaussian basis sets**, including **LDA**, **GGA**, and **B3LYP**.
+
+The CUDA implementations are designed for **GPU acceleration**, while CPU fallbacks (where available) are provided for **verification and benchmarking** against the GPU results.
 
 ---
 
@@ -35,17 +34,15 @@ nvcc -O3 --use_fast_math -shared -o ./weights/lda.so ./src/lda.cu -Xcompiler -fP
 ### C++ (CPU) Version
 
 ```bash
-g++ -shared -o ./weigths/liblda.so ./src/lda.cpp -I/usr/include/eigen3 -gencode arch=compute_86,code=sm_86 -gencode arch=compute_86,code=compute_86
+g++ -shared -o ./weights/liblda.so ./src/lda.cpp -I./eigen_lib
 ```
 
-> **Note**
+> **Note:**
 > The CPU version is intended for validation and benchmarking against the CUDA implementation.
 
 ---
 
 ### Run the Python Script
-
-Execute the Python driver script after successful compilation.
 
 Example: **water molecule (H₂O)**
 
@@ -77,18 +74,61 @@ python GGA.py Benzene
 
 ---
 
+## B3LYP (Hybrid GGA Functional)
+
+### Overview
+
+**B3LYP** is a widely used **hybrid density functional**, combining:
+
+* Local Density Approximation (LDA)
+* Generalized Gradient Approximation (GGA)
+* A fraction of **exact Hartree–Fock exchange**
+
+This implementation evaluates the **exchange–correlation energy and potential on numerical grids** using Gaussian basis sets, with CUDA acceleration for high-performance GPU execution.
+
+> ⚠️ Note:
+> Since B3LYP includes **exact exchange**, its computational cost is significantly higher than pure LDA or GGA functionals.
+
+---
+
+### Compile CUDA Source Files
+
+Example: compiling for **sm_86**
+
+```bash
+nvcc -O3 --use_fast_math -shared -o ./weights/b3lyp.so ./src/B3LYP.cu -Xcompiler -fPIC -I./eigen_lib -gencode arch=compute_86,code=sm_86 -gencode arch=compute_86,code=compute_86 -lcublas
+```
+
+---
+
+### Run the Python Script
+
+Example: **water molecule (H₂O)**
+
+```bash
+python B3LYP.py H2O
+```
+
+---
+
 ## Molecular Data and Grid Files
 
 The repository includes predefined:
 
 * Molecular coordinate files
+* Numerical integration grids
 * Auxiliary data required for DFT evaluations
 
 You may:
 
 * Select existing molecular configurations, or
-* Append your own molecular geometries definitions following the existing format.
+* Append your own molecular geometry definitions following the existing format.
 
 ---
-ps: B3LYP is developing...
+
+## Notes
+
+* GPU and CPU results are intended to be numerically consistent within acceptable floating-point tolerances.
+* Recompilation is recommended when switching GPU architectures.
+* This codebase is designed primarily for **research, verification, and educational purposes**.
 
