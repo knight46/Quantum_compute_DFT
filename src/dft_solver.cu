@@ -6,23 +6,18 @@
 #include <cublas_v2.h>
 #include <algorithm>
 
-
-
 #define CUDA_CHECK(call) do{ cudaError_t err=(call); if(err!=cudaSuccess){ fprintf(stderr,"CUDA Error: %s:%d\n",__FILE__,__LINE__); } }while(0)
 #define CUBLAS_CHECK(call) do{ cublasStatus_t err=(call); if(err!=CUBLAS_STATUS_SUCCESS){ fprintf(stderr,"CUBLAS Error at line %d\n",__LINE__); } }while(0)
 
-#define RHO_EPS 1e-20
-#define MIN_GRAD 1e-28
-
+#define RHO_EPS 1e-12
+#define MIN_GRAD 1e-20
 
 namespace kernels {
-
 
     struct VWNPar { double A, b, c, x0; };
     __constant__ VWNPar c_vwn_param[2];
     __constant__ double c_A_pw92;
     
-
     const VWNPar h_vwn_param[2] = {
         {0.0310907,  3.72744, 12.9352, -0.10498},  
         {0.01554535, 7.06042, 18.0578, -0.32500}   
@@ -35,6 +30,23 @@ namespace kernels {
     __constant__ double beta3  = 1.6382;
     __constant__ double beta4  = 0.49294;
 
+    __constant__ double C_LDA_X = 0.80;      
+    __constant__ double C_B88_X = 0.72;
+    __constant__ double C_VWN_C = 0.19;      
+    __constant__ double C_LYP_C = 0.81;
+
+    __constant__ double A_VWN_B3 = 0.0310907;
+    __constant__ double b_VWN_B3 = 13.0720;
+    __constant__ double c_VWN_B3 = 42.7198;
+    __constant__ double x0_VWN_B3 = -0.409286;
+
+    __constant__ double BETA_B88 = 0.0042;
+
+    #define LYP_A 0.04918
+    #define LYP_B 0.132
+    #define LYP_C 0.2533
+    #define LYP_D 0.349
+    #define LYP_CF     2.87123400018819108 
 
     static bool constant_init = false;
 
@@ -46,13 +58,123 @@ namespace kernels {
         }
     }
 
-
     __device__ inline void slater_exchange(double rho, double &ex, double &vx) {
         if (rho < RHO_EPS) { ex = 0.0; vx = 0.0; return; }
         const double Cx = 0.7385587663820224;
         double rho13 = pow(rho, 1.0/3.0);
         ex = -Cx * rho13;
         vx = (4.0/3.0) * ex;
+    }
+
+    __device__ inline void slater_exchange_b3lyp(double rho, double &ex, double &vx) {
+        const double Cx = -0.7385587663820224; 
+        if (rho < RHO_EPS) { ex = 0.0; vx = 0.0; return; }
+        
+        double rho13 = pow(rho, 1.0/3.0);
+        ex = Cx * rho13;          
+        vx = (4.0/3.0) * ex;      
+    }
+
+    __device__ inline void b88_exchange(double rho, double sigma, double &ex, double &vrho, double &vsigma) {
+        if (rho < RHO_EPS) { ex=0.0; vrho=0.0; vsigma=0.0; return; }
+        if (sigma < MIN_GRAD) { ex=0.0; vrho=0.0; vsigma=0.0; return; }
+
+        double rho13 = pow(rho, 1.0/3.0);
+        double rho43 = rho * rho13;
+        double grad_rho = sqrt(sigma);
+
+        double x = grad_rho / rho43;
+        double x2 = x * x;
+        double asinh_x = asinh(x);
+        
+        double denom = 1.0 + 6.0 * BETA_B88 * x * asinh_x;
+        double term = BETA_B88 * x2 / denom;
+        
+        ex = -term * rho13; 
+
+        double d_denom_dx = 6.0 * BETA_B88 * (asinh_x + x / sqrt(1.0 + x2));
+        double dF_dx = BETA_B88 * (2.0 * x * denom - x2 * d_denom_dx) / (denom * denom);
+        
+        double dE_dx = rho43 * (-dF_dx); 
+        
+        vsigma = dE_dx * (1.0 / (2.0 * rho43 * grad_rho)); 
+        
+        double E_dens = rho43 * (-term);
+        vrho = (4.0/3.0) * (E_dens / rho) - (4.0/3.0) * dE_dx * (x / rho);
+    }
+
+    __device__ inline void vwn_correlation_b3lyp(double rho, double &ec, double &vc) {
+        if (rho < RHO_EPS) { ec=0.0; vc=0.0; return; }
+        
+        double rs = pow(3.0 / (4.0 * M_PI * rho), 1.0/3.0);
+        double x = sqrt(rs);
+        
+        double X = x * x + b_VWN_B3 * x + c_VWN_B3;
+        double Q = sqrt(4.0 * c_VWN_B3 - b_VWN_B3 * b_VWN_B3);
+        
+        double log_term = log(x * x / X);
+        double atan_term = (2.0 / Q) * atan(Q / (2.0 * x + b_VWN_B3));
+        
+        double x02 = x0_VWN_B3 * x0_VWN_B3;
+        double X_x0 = x02 + b_VWN_B3 * x0_VWN_B3 + c_VWN_B3; 
+        
+        double term_c_log = log(pow(x - x0_VWN_B3, 2.0) / X);
+        double term_c_atan = (2.0 * (2.0 * x0_VWN_B3 + b_VWN_B3) / Q) * atan(Q / (2.0 * x + b_VWN_B3));
+        
+        double eps_c = A_VWN_B3 * ( log_term + b_VWN_B3 * atan_term - 
+                                     (b_VWN_B3 * x0_VWN_B3 / X_x0) * (term_c_log + term_c_atan) );
+        
+        ec = eps_c;
+
+        double d_log = 2.0/x - (2.0*x + b_VWN_B3)/X;
+        double d_atan = -1.0 / X; 
+        double d_term_c_log = 2.0/(x - x0_VWN_B3) - (2.0*x + b_VWN_B3)/X;
+        double d_term_c_atan = -(2.0*x0_VWN_B3 + b_VWN_B3) / X;
+
+        double deps_dx = A_VWN_B3 * ( d_log + b_VWN_B3 * d_atan - 
+                                       (b_VWN_B3 * x0_VWN_B3 / X_x0) * (d_term_c_log + d_term_c_atan) );
+
+        vc = eps_c - (rs / 3.0) * (deps_dx / (2.0 * x));
+    }
+
+    __device__ inline void lyp_correlation(
+        double rho, double sigma,
+        double &ec, double &vrho, double &vsigma
+    ) {
+        if (rho < 1e-14) {
+            ec = 0.0; vrho = 0.0; vsigma = 0.0;
+            return;
+        }
+        double r_13 = pow(rho, 1.0/3.0);      
+        double r_m13 = 1.0 / r_13;            
+        double r_m53 = r_m13 * r_m13 * r_m13 * r_m13 * r_m13; 
+        double exp_val = exp(-LYP_C * r_m13);
+        double denom = 1.0 + LYP_D * r_m13;
+        double denom_inv = 1.0 / denom;
+        double G = exp_val * denom_inv;
+        double term_d = LYP_D * r_m13 * denom_inv;
+        double delta = LYP_C * r_m13 + term_d;
+        double H1 = -LYP_A * rho * denom_inv;
+        double H2a = -LYP_A * LYP_B * LYP_CF * rho * G;
+        double coeff_grad = (LYP_A * LYP_B / 72.0) * sigma * r_m53 * G;
+        double H2b = coeff_grad * (3.0 + 7.0 * delta);
+        double H = H1 + H2a + H2b;
+        ec = H / rho;
+        double d_rm13 = -(1.0/3.0) * r_m13 / rho;
+        double d_denom = LYP_D * d_rm13;
+        double d_G = G * delta / (3.0 * rho);
+        double d_term_d = LYP_D * (d_rm13 * denom_inv - r_m13 * denom_inv * denom_inv * d_denom);
+        double d_delta = LYP_C * d_rm13 + d_term_d;
+        double d_H1 = -LYP_A * (denom - rho * d_denom) * (denom_inv * denom_inv);
+        double d_H2a = -LYP_A * LYP_B * LYP_CF * (G + rho * d_G);
+        double pre_factor = r_m53 * G;
+        double group_bracket = 3.0 + 7.0 * delta;
+        double term_deriv = (-5.0/(3.0*rho)) * group_bracket 
+                          + (delta / (3.0*rho)) * group_bracket 
+                          + 7.0 * d_delta;                    
+        double d_H2b = (LYP_A * LYP_B / 72.0) * sigma * pre_factor * term_deriv;
+        vrho = d_H1 + d_H2a + d_H2b;
+        vsigma = (LYP_A * LYP_B / 72.0) * r_m53 * G * (3.0 + 7.0 * delta);
     }
 
     __device__ inline void vwn_ec_sub(double x, const VWNPar &p, double &ec, double &dec_dx) {
@@ -81,7 +203,6 @@ namespace kernels {
         ec = ec0;
         vc = ec - (rs / 3.0) * (dec0_dx / (2.0 * x));
     }
-
 
     __device__ inline void pw92_correlation_rks(double rho, double &ec, double &vc) {
         if (rho < RHO_EPS) { ec = 0.0; vc = 0.0; return; }
@@ -161,9 +282,6 @@ namespace kernels {
         vrho = vc_lda + H + rho * (dH_dA * dA_drho + dH_dt2 * dt2_drho);
     }
 
-
-
-
     __global__ void reduce_sum_kernel(const double *w, const double *val, double *out, int n) {
         int tid = blockIdx.x * blockDim.x + threadIdx.x;
         double sum = 0.0;
@@ -225,7 +343,6 @@ namespace kernels {
         }
     }
 
-
     __global__ void get_rho_sigma_kernel_planar(int nao, int rows, const double *dm, const double *ao, 
                                                 const double *gx, const double *gy, const double *gz, 
                                                 double *rho, double *sigma, double *grad_rho_out) {
@@ -261,7 +378,6 @@ namespace kernels {
             grad_rho_out[g*3+2] = gr_z; 
         }
     }
-
 
     __global__ void gga_fused_kernel(
         int rows, int nao, bool compute_B,
@@ -314,8 +430,102 @@ namespace kernels {
             }
         }
     }
-} 
 
+    __global__ void b3lyp_fused_kernel(
+        int rows, int nao, bool compute_B,
+        const double *w, const double *rho, const double *sigma, const double *grad_rho,
+        const double *ao, const double *gx, const double *gy, const double *gz,
+        double *exc_out, double *B_mat
+    )
+    {
+        int k = blockIdx.x * blockDim.x + threadIdx.x; 
+        if (k >= rows) return;
+
+        double r_val = rho[k];
+        double s_val = sigma[k];
+        
+        if (r_val < RHO_EPS) {
+            if (!compute_B && exc_out) exc_out[k] = 0.0;
+            if (compute_B) {
+                for (int i = 0; i < nao; ++i) B_mat[k * nao + i] = 0.0;
+            }
+            return;
+        }
+
+        double ex_lda=0, vx_lda=0;
+        slater_exchange_b3lyp(r_val, ex_lda, vx_lda);
+        
+        double r_val_spin = r_val * 0.5;
+        double s_val_spin = s_val * 0.25;
+
+        double ex_b88=0, vrx_b88=0, vsx_b88=0;
+        double ex_b88_tmp, vrx_b88_tmp, vsx_b88_tmp;
+        
+        b88_exchange(r_val_spin, s_val_spin, ex_b88_tmp, vrx_b88_tmp, vsx_b88_tmp);
+        
+        ex_b88 = ex_b88_tmp; 
+        vrx_b88 = vrx_b88_tmp; 
+        vsx_b88 = 0.5 * vsx_b88_tmp; 
+
+        double ec_vwn=0, vc_vwn=0;
+        vwn_correlation_b3lyp(r_val, ec_vwn, vc_vwn);
+
+        double ec_lyp=0, vrc_lyp=0, vsc_lyp=0;
+        lyp_correlation(r_val, s_val, ec_lyp, vrc_lyp, vsc_lyp);
+
+        double total_eps = C_LDA_X * ex_lda + 
+                           C_B88_X * ex_b88 + 
+                           C_VWN_C * ec_vwn + 
+                           C_LYP_C * ec_lyp;
+
+        if (!compute_B && exc_out) {
+            exc_out[k] = r_val * total_eps;
+            return; 
+        }
+
+        if (compute_B) {
+            double total_vrho = C_LDA_X * vx_lda + 
+                                C_B88_X * vrx_b88 +    
+                                C_VWN_C * vc_vwn + 
+                                C_LYP_C * vrc_lyp;
+            
+            total_vrho *= 0.5;
+
+            double total_vsigma = C_B88_X * vsx_b88 + 
+                                  C_LYP_C * vsc_lyp;
+
+            double weight = w[k];
+            double gr_x = grad_rho[k*3 + 0];
+            double gr_y = grad_rho[k*3 + 1];
+            double gr_z = grad_rho[k*3 + 2];
+
+            const double *phi_row = ao + k * nao;
+            const double *gx_row = gx + k * nao;
+            const double *gy_row = gy + k * nao;
+            const double *gz_row = gz + k * nao;
+            double *B_row = B_mat + k * nao;
+
+            for (int i = 0; i < nao; ++i) {
+                double dot = gr_x * gx_row[i] + gr_y * gy_row[i] + gr_z * gz_row[i];
+                B_row[i] = weight * (total_vrho * phi_row[i] + 2.0 * total_vsigma * dot);
+            }
+        }
+    }
+
+    __global__ void symmetrize_matrix_kernel(int n, double *mat) {
+        int r = blockIdx.y * blockDim.y + threadIdx.y;
+        int c = blockIdx.x * blockDim.x + threadIdx.x;
+        
+        if (r < n && c <= r) {
+            int idx1 = r * n + c;
+            int idx2 = c * n + r;
+            
+            double val = mat[idx1] + mat[idx2];
+            mat[idx1] = val;
+            mat[idx2] = val;
+        }
+    }
+} 
 
 struct CublasHandleWrapper {
     cublasHandle_t handle;
@@ -344,7 +554,6 @@ void XCSolver::compute_coulomb(int nao, const double* d_eri, const double* d_dm,
                 N2, N2, &alpha, d_eri, N2, d_dm, 1, &beta, d_J, 1);
 }
 
-
 LDASolver::LDASolver() : XCSolver() {}
 
 double LDASolver::compute_xc(int ngrid, int nao, const double* d_dm, const double* d_ao, 
@@ -354,9 +563,7 @@ double LDASolver::compute_xc(int ngrid, int nao, const double* d_dm, const doubl
     int block = 256;
     int grid = (ngrid + block - 1) / block;
 
-
     kernels::get_rho_kernel<<<grid, block>>>(nao, ngrid, d_dm, d_ao, d_rho);
-
 
     double *d_exc_work; CUDA_CHECK(cudaMalloc(&d_exc_work, ngrid * sizeof(double)));
     kernels::lda_fused_kernel<<<grid, block>>>(ngrid, nao, false, nullptr, d_rho, nullptr, d_exc_work, nullptr);
@@ -367,10 +574,8 @@ double LDASolver::compute_xc(int ngrid, int nao, const double* d_dm, const doubl
     double exc_val;
     CUDA_CHECK(cudaMemcpy(&exc_val, d_sum, sizeof(double), cudaMemcpyDeviceToHost));
 
-
     double *d_B; CUDA_CHECK(cudaMalloc(&d_B, ngrid * nao * sizeof(double)));
     kernels::lda_fused_kernel<<<grid, block>>>(ngrid, nao, true, d_weights, d_rho, d_ao, nullptr, d_B);
-
 
     safe_cublas_dgemm(false, true, nao, nao, ngrid, d_ao, nao, d_B, nao, d_vxc, nao);
 
@@ -378,7 +583,7 @@ double LDASolver::compute_xc(int ngrid, int nao, const double* d_dm, const doubl
     return exc_val;
 }
 
-
+GGASolver::GGASolver() : XCSolver() {}
 
 double GGASolver::compute_xc(int ngrid, int nao, const double* d_dm, const double* d_ao, 
                              const double* d_ao_grad, const double* d_weights, double* d_vxc) {
@@ -394,9 +599,7 @@ double GGASolver::compute_xc(int ngrid, int nao, const double* d_dm, const doubl
     int block = 256;
     int grid = (ngrid + block - 1) / block;
 
-
     kernels::get_rho_sigma_kernel_planar<<<grid, block>>>(nao, ngrid, d_dm, d_ao, d_gx, d_gy, d_gz, d_rho, d_sigma, d_grad_rho);
-
 
     double *d_exc_work; CUDA_CHECK(cudaMalloc(&d_exc_work, ngrid * sizeof(double)));
     kernels::gga_fused_kernel<<<grid, block>>>(ngrid, nao, false, nullptr, d_rho, d_sigma, nullptr, nullptr, nullptr, nullptr, nullptr, d_exc_work, nullptr);
@@ -417,15 +620,64 @@ double GGASolver::compute_xc(int ngrid, int nao, const double* d_dm, const doubl
     return exc_val;
 }
 
+B3LYPSolver::B3LYPSolver() : XCSolver() {}
+
+double B3LYPSolver::compute_xc(int ngrid, int nao, const double* d_dm, const double* d_ao, 
+                      const double* d_ao_grad, const double* d_weights, double* d_vxc) {
+    double *d_rho, *d_sigma, *d_grad_rho;
+    CUDA_CHECK(cudaMalloc(&d_rho, ngrid * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_sigma, ngrid * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_grad_rho, 3 * ngrid * sizeof(double)));
+
+    const double *d_gx = d_ao_grad;
+    const double *d_gy = d_ao_grad + ngrid * nao;
+    const double *d_gz = d_ao_grad + 2 * ngrid * nao;
+
+    int block = 256;
+    int grid = (ngrid + block - 1) / block;
+
+    kernels::get_rho_sigma_kernel_planar<<<grid, block>>>(nao, ngrid, d_dm, d_ao, d_gx, d_gy, d_gz, d_rho, d_sigma, d_grad_rho);
+
+    double *d_exc_work; CUDA_CHECK(cudaMalloc(&d_exc_work, ngrid * sizeof(double)));
+    kernels::b3lyp_fused_kernel<<<grid, block>>>(
+        ngrid, nao, false, 
+        nullptr, d_rho, d_sigma, nullptr, 
+        nullptr, nullptr, nullptr, nullptr, 
+        d_exc_work, nullptr
+    );
+    
+    double *d_sum; CUDA_CHECK(cudaMalloc(&d_sum, sizeof(double)));
+    CUDA_CHECK(cudaMemset(d_sum, 0, sizeof(double)));
+    kernels::reduce_sum_kernel<<<256, 256>>>(d_weights, d_exc_work, d_sum, ngrid);
+    double exc_val;
+    CUDA_CHECK(cudaMemcpy(&exc_val, d_sum, sizeof(double), cudaMemcpyDeviceToHost));
+
+    double *d_B; CUDA_CHECK(cudaMalloc(&d_B, ngrid * nao * sizeof(double)));
+    kernels::b3lyp_fused_kernel<<<grid, block>>>(
+        ngrid, nao, true, 
+        d_weights, d_rho, d_sigma, d_grad_rho, 
+        d_ao, d_gx, d_gy, d_gz, 
+        nullptr, d_B
+    );
+
+    safe_cublas_dgemm(false, true, nao, nao, ngrid, d_ao, nao, d_B, nao, d_vxc, nao);
+
+    dim3 dimBlock(16, 16);
+    dim3 dimGrid((nao+15)/16, (nao+15)/16);
+    kernels::symmetrize_matrix_kernel<<<dimGrid, dimBlock>>>(nao, d_vxc);
+
+    cudaFree(d_rho); cudaFree(d_sigma); cudaFree(d_grad_rho); 
+    cudaFree(d_exc_work); cudaFree(d_sum); cudaFree(d_B);
+    return exc_val;
+}
 
 
 extern "C" {
-
-    enum SolverType { SOLVER_LDA = 0, SOLVER_GGA = 1 };
-
+    
     XCSolver* DFT_CreateSolver(int type) {
         if (type == SOLVER_LDA) return new LDASolver();
         if (type == SOLVER_GGA) return new GGASolver();
+        if (type == SOLVER_B3LYP) return new B3LYPSolver();
         return nullptr;
     }
 
@@ -434,11 +686,11 @@ extern "C" {
     }
 
     double DFT_ComputeXC(XCSolver* solver, int ngrid, int nao,
-                         unsigned long long d_dm_ptr,
-                         unsigned long long d_ao_ptr,
-                         unsigned long long d_ao_grad_ptr,
-                         unsigned long long d_weights_ptr,
-                         unsigned long long d_vxc_ptr) 
+                          unsigned long long d_dm_ptr,
+                          unsigned long long d_ao_ptr,
+                          unsigned long long d_ao_grad_ptr,
+                          unsigned long long d_weights_ptr,
+                          unsigned long long d_vxc_ptr) 
     {
         if (!solver) return 0.0;
         return solver->compute_xc(

@@ -12,7 +12,6 @@ public:
     XCSolver(const XCSolver&) = delete;
     XCSolver& operator=(const XCSolver&) = delete;
 
-
     virtual double compute_xc(int ngrid, int nao, 
                               const double* d_dm, 
                               const double* d_ao, 
@@ -30,7 +29,6 @@ protected:
     std::unique_ptr<CublasHandleWrapper> handle_wrapper;
 };
 
-
 class LDASolver : public XCSolver {
 public:
     LDASolver(); 
@@ -42,9 +40,9 @@ public:
                       double* d_vxc) override;
 };
 
-
 class GGASolver : public XCSolver {
 public:
+    GGASolver(); 
     double compute_xc(int ngrid, int nao, 
                       const double* d_dm, 
                       const double* d_ao, 
@@ -52,3 +50,39 @@ public:
                       const double* d_weights, 
                       double* d_vxc) override;
 };
+
+class B3LYPSolver : public XCSolver {
+public:
+    B3LYPSolver();
+    double compute_xc(int ngrid, int nao, 
+                      const double* d_dm, 
+                      const double* d_ao, 
+                      const double* d_ao_grad, 
+                      const double* d_weights, 
+                      double* d_vxc) override;
+};
+
+
+extern "C" {
+    enum SolverType { 
+        SOLVER_LDA = 0, 
+        SOLVER_GGA = 1, 
+        SOLVER_B3LYP = 2 
+    };
+
+    XCSolver* DFT_CreateSolver(int type);
+    
+    void DFT_DestroySolver(XCSolver* solver);
+
+    double DFT_ComputeXC(XCSolver* solver, int ngrid, int nao,
+                         unsigned long long d_dm_ptr,
+                         unsigned long long d_ao_ptr,
+                         unsigned long long d_ao_grad_ptr,
+                         unsigned long long d_weights_ptr,
+                         unsigned long long d_vxc_ptr);
+
+    void DFT_ComputeCoulomb(XCSolver* solver, int nao,
+                            unsigned long long d_eri_ptr,
+                            unsigned long long d_dm_ptr,
+                            unsigned long long d_J_ptr);
+}
